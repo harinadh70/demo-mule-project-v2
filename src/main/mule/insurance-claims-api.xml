@@ -7,8 +7,6 @@
       xmlns:file="http://www.mulesoft.org/schema/mule/file"
       xmlns:email="http://www.mulesoft.org/schema/mule/email"
       xmlns:apikit="http://www.mulesoft.org/schema/mule/mule-apikit"
-      xmlns:batch="http://www.mulesoft.org/schema/mule/batch"
-      xmlns:os="http://www.mulesoft.org/schema/mule/os"
       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
       xsi:schemaLocation="
         http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
@@ -17,9 +15,7 @@
         http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
         http://www.mulesoft.org/schema/mule/file http://www.mulesoft.org/schema/mule/file/current/mule-file.xsd
         http://www.mulesoft.org/schema/mule/email http://www.mulesoft.org/schema/mule/email/current/mule-email.xsd
-        http://www.mulesoft.org/schema/mule/mule-apikit http://www.mulesoft.org/schema/mule/mule-apikit/current/mule-apikit.xsd
-        http://www.mulesoft.org/schema/mule/batch http://www.mulesoft.org/schema/mule/batch/current/mule-batch.xsd
-        http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd">
+        http://www.mulesoft.org/schema/mule/mule-apikit http://www.mulesoft.org/schema/mule/mule-apikit/current/mule-apikit.xsd">
 
     <!-- ================================================================= -->
     <!-- GLOBAL PROPERTIES & CONFIGURATION                                  -->
@@ -105,10 +101,6 @@
             </email:tls-context>
         </email:smtps-connection>
     </email:smtp-config>
-
-    <!-- Object Store for caching -->
-    <os:object-store name="claims-cache" doc:name="Claims Cache"
-                      entryTtl="30" entryTtlUnit="MINUTES" maxEntries="500"/>
 
     <!-- ================================================================= -->
     <!-- MAIN API ROUTER                                                    -->
@@ -1000,10 +992,17 @@ output application/json
                            config-ref="azure-fileshare-config"
                            path="#[vars.docMeta.file_path]"/>
                 <set-variable variableName="httpStatus" value="200" doc:name="Set 200"/>
-                <set-variable variableName="outboundHeaders" value="#[{
-                    'Content-Type': 'application/pdf',
-                    'Content-Disposition': 'attachment; filename=\"' ++ vars.docMeta.document_name ++ '\"'
-                }]" doc:name="Set response headers"/>
+                <ee:transform doc:name="Set response headers">
+                    <ee:variables>
+                        <ee:set-variable variableName="outboundHeaders"><![CDATA[%dw 2.0
+output application/java
+---
+{
+    'Content-Type': 'application/pdf',
+    'Content-Disposition': 'attachment; filename="' ++ vars.docMeta.document_name ++ '"'
+}]]></ee:set-variable>
+                    </ee:variables>
+                </ee:transform>
             </when>
             <otherwise>
                 <set-variable variableName="httpStatus" value="404" doc:name="Set 404"/>
@@ -1407,7 +1406,9 @@ var allUp = (payload."0".payload == "UP") and (payload."1".payload == "UP")
         <try doc:name="Try sending notification">
             <choice doc:name="Notification type">
                 <when expression="#[vars.notificationType == 'CLAIM_FILED']">
-                    <email:send doc:name="Send claim filed email" config-ref="email-smtp-config">
+                    <email:send doc:name="Send claim filed email" config-ref="email-smtp-config"
+                              subject="#['New Claim Filed: ' ++ (vars.claimNumber default 'N/A')]"
+                              fromAddress="${email.smtp.user}">
                         <email:to-addresses>
                             <email:to-address value="${notification.adminEmail}"/>
                         </email:to-addresses>
@@ -1417,7 +1418,9 @@ var allUp = (payload."0".payload == "UP") and (payload."1".payload == "UP")
                     </email:send>
                 </when>
                 <when expression="#[vars.notificationType == 'CLAIM_APPROVED' or vars.notificationType == 'CLAIM_REJECTED']">
-                    <email:send doc:name="Send status update email" config-ref="email-smtp-config">
+                    <email:send doc:name="Send status update email" config-ref="email-smtp-config"
+                              subject="#['Claim Status Update: ' ++ (vars.notificationType default 'UNKNOWN')]"
+                              fromAddress="${email.smtp.user}">
                         <email:to-addresses>
                             <email:to-address value="${notification.adminEmail}"/>
                         </email:to-addresses>
