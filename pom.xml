@@ -32,6 +32,29 @@
 				<extensions>true</extensions>
 				<configuration>
 					<classifier>mule-application</classifier>
+					<additionalPluginDependencies>
+						<plugin>
+							<groupId>org.mule.connectors</groupId>
+							<artifactId>mule-db-connector</artifactId>
+							<additionalDependencies>
+								<dependency>
+									<groupId>mysql</groupId>
+									<artifactId>mysql-connector-java</artifactId>
+									<version>8.0.30</version>
+								</dependency>
+								<dependency>
+									<groupId>org.postgresql</groupId>
+									<artifactId>postgresql</artifactId>
+									<version>42.7.3</version>
+								</dependency>
+								<dependency>
+									<groupId>com.microsoft.sqlserver</groupId>
+									<artifactId>mssql-jdbc</artifactId>
+									<version>12.6.1.jre11</version>
+								</dependency>
+							</additionalDependencies>
+						</plugin>
+					</additionalPluginDependencies>
 					<sharedLibraries>
 						<sharedLibrary>
 							<groupId>mysql</groupId>
@@ -72,7 +95,7 @@
 		<dependency>
 			<groupId>org.mule.connectors</groupId>
 			<artifactId>mule-file-connector</artifactId>
-			<version>1.6.0</version>
+			<version>1.5.2</version>
 			<classifier>mule-plugin</classifier>
 		</dependency>
 

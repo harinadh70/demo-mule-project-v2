@@ -44,10 +44,51 @@
             <tls:context>
                 <tls:trust-store insecure="true"/>
             </tls:context>
-            <http:default-headers>
-                <http:default-header key="X-API-Key" value="${notification.apiKey}"/>
-                <http:default-header key="Content-Type" value="application/json"/>
-            </http:default-headers>
+        </http:request-connection>
+        <http:default-headers>
+            <http:default-header key="X-API-Key" value="${notification.apiKey}"/>
+            <http:default-header key="Content-Type" value="application/json"/>
+        </http:default-headers>
+    </http:request-config>
+
+    <!-- PUBLIC API: RestCountries - Country/address validation -->
+    <http:request-config name="restcountries-api-config" doc:name="RestCountries API">
+        <http:request-connection host="restcountries.com" port="443" protocol="HTTPS">
+            <tls:context>
+                <tls:trust-store insecure="true"/>
+            </tls:context>
+        </http:request-connection>
+    </http:request-config>
+
+    <!-- PUBLIC API: Exchange Rate API - Currency conversion for international claims -->
+    <http:request-config name="exchange-rate-api-config" doc:name="Exchange Rate API">
+        <http:request-connection host="open.er-api.com" port="443" protocol="HTTPS">
+            <tls:context>
+                <tls:trust-store insecure="true"/>
+            </tls:context>
+        </http:request-connection>
+    </http:request-config>
+
+    <!-- PUBLIC API: Open-Meteo - Weather data for weather-related claims validation -->
+    <http:request-config name="weather-api-config" doc:name="Open-Meteo Weather API">
+        <http:request-connection host="api.open-meteo.com" port="443" protocol="HTTPS">
+            <tls:context>
+                <tls:trust-store insecure="true"/>
+            </tls:context>
+        </http:request-connection>
+    </http:request-config>
+
+    <!-- PUBLIC API: IP-API - Geolocation for fraud detection -->
+    <http:request-config name="ip-geolocation-api-config" doc:name="IP Geolocation API">
+        <http:request-connection host="ip-api.com" port="80" protocol="HTTP"/>
+    </http:request-config>
+
+    <!-- PUBLIC API: JSONPlaceholder - Mock external CRM/user service -->
+    <http:request-config name="jsonplaceholder-api-config" doc:name="JSONPlaceholder Mock API">
+        <http:request-connection host="jsonplaceholder.typicode.com" port="443" protocol="HTTPS">
+            <tls:context>
+                <tls:trust-store insecure="true"/>
+            </tls:context>
         </http:request-connection>
     </http:request-config>
 
@@ -1359,6 +1400,484 @@ var allUp = (payload."0".payload == "UP") and (payload."1".payload == "UP")
 }]]></ee:set-payload>
             </ee:message>
         </ee:transform>
+    </flow>
+
+    <!-- ================================================================= -->
+    <!-- PUBLIC API INTEGRATIONS                                             -->
+    <!-- ================================================================= -->
+
+    <!-- Enrich claim with country data, currency rates, weather (scatter-gather) -->
+    <flow name="get:\claims\(claimId)\enrich:insurance-api-router">
+        <logger level="INFO" doc:name="Log" message="#['Enriching claim ' ++ attributes.uriParams.claimId ++ ' with external data']"/>
+        <set-variable variableName="claimId" value="#[attributes.uriParams.claimId]" doc:name="Set claimId"/>
+        <!-- Fetch claim from DB first -->
+        <db:select doc:name="Get claim details" config-ref="claims-db-config">
+            <db:sql>SELECT c.*, p.policy_number, p.holder_name, p.holder_email, p.policy_type
+                    FROM claims c JOIN policies p ON c.policy_id = p.policy_id
+                    WHERE c.claim_id = :claimId</db:sql>
+            <db:input-parameters><![CDATA[#[{ claimId: vars.claimId }]]]></db:input-parameters>
+        </db:select>
+        <choice doc:name="Claim exists?">
+            <when expression="#[sizeOf(payload) > 0]">
+                <set-variable variableName="claimDetails" value="#[payload[0]]" doc:name="Save claim"/>
+                <!-- Call multiple public APIs in parallel using scatter-gather -->
+                <scatter-gather doc:name="Parallel public API calls">
+                    <route>
+                        <try doc:name="Try country API">
+                            <http:request doc:name="Get country data" config-ref="restcountries-api-config"
+                                          method="GET" path="/v3.1/name/united states">
+                                <http:query-params><![CDATA[#[output application/java --- { fields: "name,capital,currencies,region,population,flags" }]]]></http:query-params>
+                            </http:request>
+                            <ee:transform doc:name="Parse country response">
+                                <ee:message>
+                                    <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+    source: "restcountries.com",
+    country: payload[0].name.common default "Unknown",
+    capital: payload[0].capital[0] default "Unknown",
+    region: payload[0].region default "Unknown",
+    population: payload[0].population default 0,
+    currencies: payload[0].currencies default {}
+}]]></ee:set-payload>
+                                </ee:message>
+                            </ee:transform>
+                            <error-handler>
+                                <on-error-continue doc:name="Country API fallback">
+                                    <ee:transform doc:name="Fallback">
+                                        <ee:message>
+                                            <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ source: "restcountries.com", status: "unavailable", error: error.description }]]></ee:set-payload>
+                                        </ee:message>
+                                    </ee:transform>
+                                </on-error-continue>
+                            </error-handler>
+                        </try>
+                    </route>
+                    <route>
+                        <try doc:name="Try exchange rate API">
+                            <http:request doc:name="Get USD exchange rates" config-ref="exchange-rate-api-config"
+                                          method="GET" path="/v6/latest/USD"/>
+                            <ee:transform doc:name="Parse exchange rates">
+                                <ee:message>
+                                    <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+    source: "open.er-api.com",
+    baseCurrency: "USD",
+    claimAmountUSD: vars.claimDetails.claim_amount default 0,
+    convertedAmounts: {
+        EUR: (vars.claimDetails.claim_amount default 0) * (payload.rates.EUR default 0),
+        GBP: (vars.claimDetails.claim_amount default 0) * (payload.rates.GBP default 0),
+        CAD: (vars.claimDetails.claim_amount default 0) * (payload.rates.CAD default 0),
+        INR: (vars.claimDetails.claim_amount default 0) * (payload.rates.INR default 0),
+        JPY: (vars.claimDetails.claim_amount default 0) * (payload.rates.JPY default 0)
+    },
+    lastUpdated: payload.time_last_update_utc default "unknown"
+}]]></ee:set-payload>
+                                </ee:message>
+                            </ee:transform>
+                            <error-handler>
+                                <on-error-continue doc:name="Exchange rate fallback">
+                                    <ee:transform doc:name="Fallback">
+                                        <ee:message>
+                                            <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ source: "open.er-api.com", status: "unavailable", error: error.description }]]></ee:set-payload>
+                                        </ee:message>
+                                    </ee:transform>
+                                </on-error-continue>
+                            </error-handler>
+                        </try>
+                    </route>
+                    <route>
+                        <try doc:name="Try weather API">
+                            <http:request doc:name="Get weather data" config-ref="weather-api-config"
+                                          method="GET" path="/v1/forecast">
+                                <http:query-params><![CDATA[#[output application/java --- {
+                                    latitude: "40.7128",
+                                    longitude: "-74.0060",
+                                    current_weather: "true",
+                                    daily: "temperature_2m_max,temperature_2m_min,precipitation_sum,windspeed_10m_max",
+                                    timezone: "America/New_York",
+                                    forecast_days: "3"
+                                }]]]></http:query-params>
+                            </http:request>
+                            <ee:transform doc:name="Parse weather data">
+                                <ee:message>
+                                    <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+    source: "api.open-meteo.com",
+    location: "New York, NY (default)",
+    currentWeather: payload.current_weather default {},
+    dailyForecast: if (payload.daily != null)
+        (payload.daily.time default []) map ((day, idx) -> {
+            date: day,
+            tempMax: (payload.daily.temperature_2m_max[idx]) default null,
+            tempMin: (payload.daily.temperature_2m_min[idx]) default null,
+            precipitation: (payload.daily.precipitation_sum[idx]) default null,
+            windspeedMax: (payload.daily.windspeed_10m_max[idx]) default null
+        })
+    else [],
+    relevance: "Weather data can validate weather-related claims (storms, floods, hail)"
+}]]></ee:set-payload>
+                                </ee:message>
+                            </ee:transform>
+                            <error-handler>
+                                <on-error-continue doc:name="Weather API fallback">
+                                    <ee:transform doc:name="Fallback">
+                                        <ee:message>
+                                            <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ source: "api.open-meteo.com", status: "unavailable", error: error.description }]]></ee:set-payload>
+                                        </ee:message>
+                                    </ee:transform>
+                                </on-error-continue>
+                            </error-handler>
+                        </try>
+                    </route>
+                </scatter-gather>
+                <!-- Combine all enrichment data -->
+                <ee:transform doc:name="Combine enrichment results">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+    success: true,
+    claimId: vars.claimId as Number,
+    claimNumber: vars.claimDetails.claim_number default "N/A",
+    policyNumber: vars.claimDetails.policy_number default "N/A",
+    holderName: vars.claimDetails.holder_name default "N/A",
+    claimAmount: vars.claimDetails.claim_amount default 0,
+    enrichment: {
+        countryData: payload."0".payload,
+        currencyConversion: payload."1".payload,
+        weatherData: payload."2".payload
+    },
+    enrichedAt: now() as String {format: "yyyy-MM-dd'T'HH:mm:ss'Z'"}
+}]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+                <!-- Log enrichment to Audit DB -->
+                <flow-ref name="audit-access-sub-flow" doc:name="Audit enrichment"/>
+            </when>
+            <otherwise>
+                <set-variable variableName="httpStatus" value="404" doc:name="Set 404"/>
+                <ee:transform doc:name="Claim not found">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ success: false, error: "Claim not found", claimId: vars.claimId }]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+            </otherwise>
+        </choice>
+    </flow>
+
+    <!-- Currency Conversion Endpoint -->
+    <flow name="get:\external\currency\(fromCurrency)\(toCurrency)\(amount):insurance-api-router">
+        <logger level="INFO" doc:name="Log" message="#['Currency conversion: ' ++ attributes.uriParams.amount ++ ' ' ++ attributes.uriParams.fromCurrency ++ ' to ' ++ attributes.uriParams.toCurrency]"/>
+        <set-variable variableName="fromCurrency" value="#[attributes.uriParams.fromCurrency]" doc:name="Set from"/>
+        <set-variable variableName="toCurrency" value="#[attributes.uriParams.toCurrency]" doc:name="Set to"/>
+        <set-variable variableName="amount" value="#[attributes.uriParams.amount]" doc:name="Set amount"/>
+        <http:request doc:name="Get exchange rates" config-ref="exchange-rate-api-config"
+                      method="GET" path="#['/v6/latest/' ++ vars.fromCurrency]"/>
+        <ee:transform doc:name="Calculate conversion">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+var rate = payload.rates[vars.toCurrency] default 0
+---
+{
+    success: true,
+    source: "open.er-api.com",
+    from: vars.fromCurrency,
+    to: vars.toCurrency,
+    amount: vars.amount as Number,
+    rate: rate,
+    convertedAmount: (vars.amount as Number) * rate,
+    lastUpdated: payload.time_last_update_utc default "unknown"
+}]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+        <error-handler>
+            <on-error-propagate type="ANY" doc:name="Currency conversion error">
+                <set-variable variableName="httpStatus" value="502" doc:name="Set 502"/>
+                <ee:transform doc:name="Error response">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ success: false, error: "Currency conversion failed: " ++ error.description }]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+            </on-error-propagate>
+        </error-handler>
+    </flow>
+
+    <!-- Weather Lookup Endpoint (for claim validation) -->
+    <flow name="get:\external\weather:insurance-api-router">
+        <logger level="INFO" doc:name="Log" message="#['Weather lookup: lat=' ++ (attributes.queryParams.latitude default '0') ++ ' lon=' ++ (attributes.queryParams.longitude default '0')]"/>
+        <http:request doc:name="Get weather forecast" config-ref="weather-api-config"
+                      method="GET" path="/v1/forecast">
+            <http:query-params><![CDATA[#[output application/java --- {
+                latitude: attributes.queryParams.latitude default "40.7128",
+                longitude: attributes.queryParams.longitude default "-74.0060",
+                current_weather: "true",
+                daily: "temperature_2m_max,temperature_2m_min,precipitation_sum,windspeed_10m_max,weathercode",
+                timezone: attributes.queryParams.timezone default "auto",
+                forecast_days: attributes.queryParams.days default "7"
+            }]]]></http:query-params>
+        </http:request>
+        <ee:transform doc:name="Format weather response">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+    success: true,
+    source: "api.open-meteo.com",
+    coordinates: {
+        latitude: payload.latitude,
+        longitude: payload.longitude
+    },
+    timezone: payload.timezone default "unknown",
+    currentWeather: payload.current_weather default {},
+    dailyForecast: if (payload.daily != null)
+        (payload.daily.time default []) map ((day, idx) -> {
+            date: day,
+            tempMaxC: (payload.daily.temperature_2m_max[idx]) default null,
+            tempMinC: (payload.daily.temperature_2m_min[idx]) default null,
+            precipitationMm: (payload.daily.precipitation_sum[idx]) default null,
+            windspeedMaxKmh: (payload.daily.windspeed_10m_max[idx]) default null,
+            weatherCode: (payload.daily.weathercode[idx]) default null
+        })
+    else [],
+    usage: "Use for validating weather-related insurance claims (storms, floods, hail damage)"
+}]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+        <error-handler>
+            <on-error-propagate type="ANY" doc:name="Weather API error">
+                <set-variable variableName="httpStatus" value="502" doc:name="Set 502"/>
+                <ee:transform doc:name="Error response">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ success: false, error: "Weather API failed: " ++ error.description }]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+            </on-error-propagate>
+        </error-handler>
+    </flow>
+
+    <!-- Country Information Lookup -->
+    <flow name="get:\external\country\(countryName):insurance-api-router">
+        <logger level="INFO" doc:name="Log" message="#['Country lookup: ' ++ attributes.uriParams.countryName]"/>
+        <http:request doc:name="Get country info" config-ref="restcountries-api-config"
+                      method="GET" path="#['/v3.1/name/' ++ attributes.uriParams.countryName]">
+            <http:query-params><![CDATA[#[output application/java --- { fields: "name,capital,currencies,region,subregion,population,flags,languages,timezones" }]]]></http:query-params>
+        </http:request>
+        <ee:transform doc:name="Format country response">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+    success: true,
+    source: "restcountries.com",
+    results: payload map ((country) -> {
+        name: country.name.common default "Unknown",
+        officialName: country.name.official default "Unknown",
+        capital: country.capital default [],
+        region: country.region default "Unknown",
+        subregion: country.subregion default "Unknown",
+        population: country.population default 0,
+        currencies: country.currencies default {},
+        languages: country.languages default {},
+        timezones: country.timezones default [],
+        flag: country.flags.png default ""
+    })
+}]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+        <error-handler>
+            <on-error-propagate type="ANY" doc:name="Country API error">
+                <set-variable variableName="httpStatus" value="502" doc:name="Set 502"/>
+                <ee:transform doc:name="Error response">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ success: false, error: "Country lookup failed: " ++ error.description }]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+            </on-error-propagate>
+        </error-handler>
+    </flow>
+
+    <!-- IP Geolocation (Fraud Detection) -->
+    <flow name="get:\external\geolocation\(ipAddress):insurance-api-router">
+        <logger level="INFO" doc:name="Log" message="#['Geolocation lookup for IP: ' ++ attributes.uriParams.ipAddress]"/>
+        <http:request doc:name="Get IP geolocation" config-ref="ip-geolocation-api-config"
+                      method="GET" path="#['/json/' ++ attributes.uriParams.ipAddress]"/>
+        <ee:transform doc:name="Format geolocation response">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+    success: true,
+    source: "ip-api.com",
+    ipAddress: payload.query default "unknown",
+    location: {
+        country: payload.country default "Unknown",
+        countryCode: payload.countryCode default "XX",
+        region: payload.regionName default "Unknown",
+        city: payload.city default "Unknown",
+        zipCode: payload.zip default "Unknown",
+        latitude: payload.lat default 0,
+        longitude: payload.lon default 0,
+        timezone: payload.timezone default "Unknown"
+    },
+    network: {
+        isp: payload.isp default "Unknown",
+        org: payload.org default "Unknown",
+        as: payload.as default "Unknown"
+    },
+    fraudCheck: {
+        note: "Compare claimant's stated location with IP geolocation for fraud indicators",
+        isVPN: false,
+        isProxy: false
+    }
+}]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+        <error-handler>
+            <on-error-propagate type="ANY" doc:name="Geolocation error">
+                <set-variable variableName="httpStatus" value="502" doc:name="Set 502"/>
+                <ee:transform doc:name="Error response">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ success: false, error: "Geolocation lookup failed: " ++ error.description }]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+            </on-error-propagate>
+        </error-handler>
+    </flow>
+
+    <!-- Mock External CRM - Get Users (JSONPlaceholder) -->
+    <flow name="get:\external\crm\users:insurance-api-router">
+        <logger level="INFO" doc:name="Log" message="Fetching external CRM users"/>
+        <http:request doc:name="Get CRM users" config-ref="jsonplaceholder-api-config"
+                      method="GET" path="/users"/>
+        <ee:transform doc:name="Map to insurance context">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+    success: true,
+    source: "jsonplaceholder.typicode.com (mock CRM)",
+    totalUsers: sizeOf(payload),
+    users: payload map ((user) -> {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        company: user.company.name default "N/A",
+        address: {
+            street: user.address.street default "",
+            city: user.address.city default "",
+            zipcode: user.address.zipcode default "",
+            geo: user.address.geo default {}
+        }
+    })
+}]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+        <error-handler>
+            <on-error-propagate type="ANY" doc:name="CRM API error">
+                <set-variable variableName="httpStatus" value="502" doc:name="Set 502"/>
+                <ee:transform doc:name="Error response">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ success: false, error: "CRM service failed: " ++ error.description }]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+            </on-error-propagate>
+        </error-handler>
+    </flow>
+
+    <!-- Mock External CRM - Get User Posts/Activity (JSONPlaceholder) -->
+    <flow name="get:\external\crm\users\(userId)\activity:insurance-api-router">
+        <logger level="INFO" doc:name="Log" message="#['Fetching CRM activity for user ' ++ attributes.uriParams.userId]"/>
+        <scatter-gather doc:name="Fetch user details and posts in parallel">
+            <route>
+                <http:request doc:name="Get user details" config-ref="jsonplaceholder-api-config"
+                              method="GET" path="#['/users/' ++ attributes.uriParams.userId]"/>
+            </route>
+            <route>
+                <http:request doc:name="Get user posts" config-ref="jsonplaceholder-api-config"
+                              method="GET" path="#['/users/' ++ attributes.uriParams.userId ++ '/posts']"/>
+            </route>
+            <route>
+                <http:request doc:name="Get user todos" config-ref="jsonplaceholder-api-config"
+                              method="GET" path="#['/users/' ++ attributes.uriParams.userId ++ '/todos']"/>
+            </route>
+        </scatter-gather>
+        <ee:transform doc:name="Combine CRM activity">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+    success: true,
+    source: "jsonplaceholder.typicode.com (mock CRM)",
+    user: {
+        id: payload."0".payload.id,
+        name: payload."0".payload.name,
+        email: payload."0".payload.email,
+        phone: payload."0".payload.phone,
+        company: payload."0".payload.company.name default "N/A"
+    },
+    recentPosts: (payload."1".payload default []) map ((post) -> {
+        id: post.id,
+        title: post.title
+    }),
+    pendingTasks: sizeOf((payload."2".payload default []) filter ((todo) -> todo.completed == false)),
+    completedTasks: sizeOf((payload."2".payload default []) filter ((todo) -> todo.completed == true))
+}]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+        <error-handler>
+            <on-error-propagate type="ANY" doc:name="CRM activity error">
+                <set-variable variableName="httpStatus" value="502" doc:name="Set 502"/>
+                <ee:transform doc:name="Error response">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ success: false, error: "CRM activity fetch failed: " ++ error.description }]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+            </on-error-propagate>
+        </error-handler>
     </flow>
 
     <!-- ================================================================= -->

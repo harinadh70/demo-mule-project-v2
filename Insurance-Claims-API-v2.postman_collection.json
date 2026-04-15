@@ -2,7 +2,7 @@
 	"info": {
 		"_postman_id": "insurance-claims-api-v2-demo",
 		"name": "Insurance Claims API v2 (Multi-DB + File Share)",
-		"description": "MuleSoft Insurance Claims API v2 - 3 Databases (MySQL, PostgreSQL, SQL Server) + Azure File Share + Email + Audit Trail",
+		"description": "MuleSoft Insurance Claims API v2 - 3 Databases (MySQL, PostgreSQL, SQL Server) + Azure File Share + Email + Audit Trail + Public API Integrations (RestCountries, ExchangeRate, Weather, Geolocation, CRM)",
 		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
 	},
 	"variable": [
@@ -235,6 +235,104 @@
 						"method": "GET",
 						"url": { "raw": "{{baseUrl}}/audit?entityType=CLAIM&days=7", "host": ["{{baseUrl}}"], "path": ["audit"], "query": [{"key":"entityType","value":"CLAIM"},{"key":"days","value":"7"}] },
 						"description": "Filter audit trail to claims-only from last 7 days"
+					}
+				}
+			]
+		},
+		{
+			"name": "Claim Enrichment (Multi-API)",
+			"item": [
+				{
+					"name": "Enrich Claim with External Data (3 Public APIs)",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{baseUrl}}/claims/1/enrich", "host": ["{{baseUrl}}"], "path": ["claims", "1", "enrich"] },
+						"description": "Calls 3 public APIs in parallel (scatter-gather): RestCountries, ExchangeRate API, Open-Meteo Weather. Enriches claim with country data, currency conversion, and weather info."
+					}
+				}
+			]
+		},
+		{
+			"name": "Public API Integrations",
+			"item": [
+				{
+					"name": "Currency Conversion (USD to EUR)",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{baseUrl}}/external/currency/USD/EUR/1000", "host": ["{{baseUrl}}"], "path": ["external", "currency", "USD", "EUR", "1000"] },
+						"description": "Real-time currency conversion via ExchangeRate API (open.er-api.com). Converts 1000 USD to EUR."
+					}
+				},
+				{
+					"name": "Currency Conversion (GBP to INR)",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{baseUrl}}/external/currency/GBP/INR/5000", "host": ["{{baseUrl}}"], "path": ["external", "currency", "GBP", "INR", "5000"] },
+						"description": "Real-time currency conversion via ExchangeRate API. Converts 5000 GBP to INR."
+					}
+				},
+				{
+					"name": "Weather Lookup - New York",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{baseUrl}}/external/weather?latitude=40.7128&longitude=-74.0060&days=7", "host": ["{{baseUrl}}"], "path": ["external", "weather"], "query": [{"key":"latitude","value":"40.7128"},{"key":"longitude","value":"-74.0060"},{"key":"days","value":"7"}] },
+						"description": "7-day weather forecast for New York via Open-Meteo API. Use for validating weather-related insurance claims (storms, floods, hail)."
+					}
+				},
+				{
+					"name": "Weather Lookup - London",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{baseUrl}}/external/weather?latitude=51.5074&longitude=-0.1278&days=3", "host": ["{{baseUrl}}"], "path": ["external", "weather"], "query": [{"key":"latitude","value":"51.5074"},{"key":"longitude","value":"-0.1278"},{"key":"days","value":"3"}] },
+						"description": "3-day weather forecast for London via Open-Meteo API."
+					}
+				},
+				{
+					"name": "Country Lookup - United States",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{baseUrl}}/external/country/united states", "host": ["{{baseUrl}}"], "path": ["external", "country", "united states"] },
+						"description": "Country information via RestCountries API (restcountries.com). Returns currencies, capital, population, languages, flag."
+					}
+				},
+				{
+					"name": "Country Lookup - India",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{baseUrl}}/external/country/india", "host": ["{{baseUrl}}"], "path": ["external", "country", "india"] },
+						"description": "Country information for India via RestCountries API."
+					}
+				},
+				{
+					"name": "IP Geolocation - Fraud Check (8.8.8.8)",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{baseUrl}}/external/geolocation/8.8.8.8", "host": ["{{baseUrl}}"], "path": ["external", "geolocation", "8.8.8.8"] },
+						"description": "IP geolocation via ip-api.com for fraud detection. Compare claimant stated location vs IP location. Tests with Google DNS (8.8.8.8)."
+					}
+				},
+				{
+					"name": "IP Geolocation - Fraud Check (1.1.1.1)",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{baseUrl}}/external/geolocation/1.1.1.1", "host": ["{{baseUrl}}"], "path": ["external", "geolocation", "1.1.1.1"] },
+						"description": "IP geolocation for Cloudflare DNS (1.1.1.1)."
+					}
+				},
+				{
+					"name": "CRM - Get All Users",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{baseUrl}}/external/crm/users", "host": ["{{baseUrl}}"], "path": ["external", "crm", "users"] },
+						"description": "Mock external CRM user list via JSONPlaceholder API (jsonplaceholder.typicode.com). Returns 10 mock users with addresses and company info."
+					}
+				},
+				{
+					"name": "CRM - Get User Activity (Scatter-Gather)",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{baseUrl}}/external/crm/users/1/activity", "host": ["{{baseUrl}}"], "path": ["external", "crm", "users", "1", "activity"] },
+						"description": "Mock CRM user activity via JSONPlaceholder. Uses scatter-gather to fetch user details, posts, and todos in parallel from 3 different API endpoints."
 					}
 				}
 			]

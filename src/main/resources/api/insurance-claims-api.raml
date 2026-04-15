@@ -317,6 +317,21 @@ types:
           body:
             type: ErrorResponse
 
+    /enrich:
+      get:
+        displayName: Enrich Claim Data
+        description: Enriches claim with external public API data - country info (RestCountries), currency conversion (ExchangeRate API), and weather data (Open-Meteo) using parallel scatter-gather
+        responses:
+          200:
+            body:
+              type: object
+          404:
+            body:
+              type: ErrorResponse
+          502:
+            body:
+              type: ErrorResponse
+
     /status:
       put:
         displayName: Update Claim Status
@@ -426,3 +441,122 @@ types:
       200:
         body:
           type: HealthResponse
+
+/external:
+  description: Public API Integrations - Real external HTTP calls to public APIs
+  /currency:
+    /{fromCurrency}:
+      /{toCurrency}:
+        /{amount}:
+          uriParameters:
+            fromCurrency:
+              type: string
+              description: Source currency code (e.g., USD, EUR, GBP)
+            toCurrency:
+              type: string
+              description: Target currency code
+            amount:
+              type: string
+              description: Amount to convert
+          get:
+            displayName: Convert Currency
+            description: Real-time currency conversion via ExchangeRate API (open.er-api.com)
+            responses:
+              200:
+                body:
+                  type: object
+              502:
+                body:
+                  type: ErrorResponse
+
+  /weather:
+    get:
+      displayName: Weather Lookup
+      description: Weather forecast via Open-Meteo API - useful for validating weather-related insurance claims
+      queryParameters:
+        latitude:
+          type: string
+          default: "40.7128"
+          required: false
+        longitude:
+          type: string
+          default: "-74.0060"
+          required: false
+        timezone:
+          type: string
+          default: "auto"
+          required: false
+        days:
+          type: string
+          default: "7"
+          required: false
+      responses:
+        200:
+          body:
+            type: object
+        502:
+          body:
+            type: ErrorResponse
+
+  /country:
+    /{countryName}:
+      uriParameters:
+        countryName:
+          type: string
+          description: Country name to look up
+      get:
+        displayName: Country Information
+        description: Country data via RestCountries API (restcountries.com) - currencies, capital, population
+        responses:
+          200:
+            body:
+              type: object
+          502:
+            body:
+              type: ErrorResponse
+
+  /geolocation:
+    /{ipAddress}:
+      uriParameters:
+        ipAddress:
+          type: string
+          description: IP address to geolocate (for fraud detection)
+      get:
+        displayName: IP Geolocation
+        description: IP geolocation via ip-api.com - compare claimant location for fraud detection
+        responses:
+          200:
+            body:
+              type: object
+          502:
+            body:
+              type: ErrorResponse
+
+  /crm:
+    /users:
+      get:
+        displayName: Get CRM Users
+        description: Mock external CRM user data via JSONPlaceholder API (jsonplaceholder.typicode.com)
+        responses:
+          200:
+            body:
+              type: object
+          502:
+            body:
+              type: ErrorResponse
+      /{userId}:
+        /activity:
+          uriParameters:
+            userId:
+              type: string
+              description: CRM user ID
+          get:
+            displayName: Get User Activity
+            description: Mock CRM user activity - posts and tasks via JSONPlaceholder (scatter-gather parallel fetch)
+            responses:
+              200:
+                body:
+                  type: object
+              502:
+                body:
+                  type: ErrorResponse
