@@ -1,0 +1,54 @@
+# ========================================
+# SIT Environment - Insurance Claims API v2
+# ========================================
+
+http:
+  host: "0.0.0.0"
+  port: "8081"
+
+db:
+  claims:
+    host: "insurance-claims-mysql-sit.mysql.database.azure.com"
+    port: "3306"
+    name: "insurance_claims"
+    user: "claimsadmin"
+    password: "${secure::db.claims.password}"
+
+  audit:
+    url: "jdbc:postgresql://insurance-audit-pg-sit.postgres.database.azure.com:5432/audit_db?sslmode=require"
+    user: "auditadmin"
+    password: "${secure::db.audit.password}"
+
+  documents:
+    host: "insurance-docs-sql-sit.database.windows.net"
+    port: "1433"
+    name: "documents_db"
+    user: "docsadmin"
+    password: "${secure::db.documents.password}"
+
+azure:
+  fileshare:
+    basePath: "/mnt/azure-fileshare/insurance-docs-sit"
+    storageAccount: "insurancedocssit"
+    shareName: "claim-documents"
+    connectionString: "${secure::azure.fileshare.connectionString}"
+
+email:
+  smtp:
+    host: "smtp.azurecomm.net"
+    port: "587"
+    user: "insurance-api-sit@acme-insurance.com"
+    password: "${secure::email.smtp.password}"
+
+notification:
+  host: "notification-service-sit.azurewebsites.net"
+  port: "443"
+  apiKey: "${secure::notification.apiKey}"
+  adminEmail: "claims-admin-sit@acme-insurance.com"
+
+api:
+  autodiscovery:
+    id: "insurance-claims-api-v2-sit"
+
+logging:
+  level: "INFO"

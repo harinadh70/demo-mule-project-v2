@@ -1,0 +1,243 @@
+{
+	"info": {
+		"_postman_id": "insurance-claims-api-v2-demo",
+		"name": "Insurance Claims API v2 (Multi-DB + File Share)",
+		"description": "MuleSoft Insurance Claims API v2 - 3 Databases (MySQL, PostgreSQL, SQL Server) + Azure File Share + Email + Audit Trail",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{ "key": "baseUrl", "value": "http://localhost:8081/api/v1", "type": "string" }
+	],
+	"item": [
+		{
+			"name": "Health Check",
+			"item": [
+				{
+					"name": "Health Check (All Services)",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{baseUrl}}/health", "host": ["{{baseUrl}}"], "path": ["health"] },
+						"description": "Checks connectivity to all 3 databases (MySQL, PostgreSQL, SQL Server) + Azure File Share"
+					}
+				}
+			]
+		},
+		{
+			"name": "Policies",
+			"item": [
+				{
+					"name": "Get All Policies (Paginated)",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{baseUrl}}/policies?page=1&pageSize=10", "host": ["{{baseUrl}}"], "path": ["policies"], "query": [{"key":"page","value":"1"},{"key":"pageSize","value":"10"}] },
+						"description": "Retrieve paginated policies from Claims DB (MySQL)"
+					}
+				},
+				{
+					"name": "Get Policy by ID (3-DB Fetch)",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{baseUrl}}/policies/1", "host": ["{{baseUrl}}"], "path": ["policies", "1"] },
+						"description": "Fetches policy from MySQL, claims history from MySQL, audit trail from PostgreSQL, and documents from SQL Server"
+					}
+				},
+				{
+					"name": "Create New Policy",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"policyNumber\": \"POL-2026-015\",\n  \"holderName\": \"David Wilson\",\n  \"holderEmail\": \"david.wilson@email.com\",\n  \"policyType\": \"TRAVEL\",\n  \"coverageAmount\": 25000.00,\n  \"premium\": 450.00,\n  \"effectiveDate\": \"2026-04-15\",\n  \"expirationDate\": \"2027-04-15\"\n}"
+						},
+						"url": { "raw": "{{baseUrl}}/policies", "host": ["{{baseUrl}}"], "path": ["policies"] },
+						"description": "Creates policy in MySQL Claims DB + logs audit in PostgreSQL + sends email notification"
+					}
+				},
+				{
+					"name": "Update Policy",
+					"request": {
+						"method": "PUT",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"holderName\": \"David J. Wilson\",\n  \"holderEmail\": \"david.j.wilson@email.com\",\n  \"coverageAmount\": 35000.00,\n  \"premium\": 550.00\n}"
+						},
+						"url": { "raw": "{{baseUrl}}/policies/1", "host": ["{{baseUrl}}"], "path": ["policies", "1"] },
+						"description": "Updates policy in MySQL + logs audit in PostgreSQL"
+					}
+				},
+				{
+					"name": "Delete Policy (Soft Delete)",
+					"request": {
+						"method": "DELETE",
+						"url": { "raw": "{{baseUrl}}/policies/5", "host": ["{{baseUrl}}"], "path": ["policies", "5"] },
+						"description": "Checks for open claims first, then soft-deletes in MySQL + logs in PostgreSQL"
+					}
+				}
+			]
+		},
+		{
+			"name": "Claims",
+			"item": [
+				{
+					"name": "Get All Claims",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{baseUrl}}/claims", "host": ["{{baseUrl}}"], "path": ["claims"] },
+						"description": "Get all claims with policy details (JOIN on MySQL)"
+					}
+				},
+				{
+					"name": "Get Claims - Filter by Status",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{baseUrl}}/claims?status=SUBMITTED", "host": ["{{baseUrl}}"], "path": ["claims"], "query": [{"key":"status","value":"SUBMITTED"}] },
+						"description": "Filter claims by status (SUBMITTED, UNDER_REVIEW, APPROVED, REJECTED, CLOSED)"
+					}
+				},
+				{
+					"name": "Get Claim by ID (3-DB Fetch)",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{baseUrl}}/claims/1", "host": ["{{baseUrl}}"], "path": ["claims", "1"] },
+						"description": "Fetches claim from MySQL, documents from SQL Server, audit from PostgreSQL"
+					}
+				},
+				{
+					"name": "File a New Claim",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"policyId\": 3,\n  \"claimantName\": \"Mike Davis\",\n  \"claimType\": \"MEDICAL\",\n  \"description\": \"Emergency hospital visit - chest pain, overnight stay for observation and testing\",\n  \"claimAmount\": 8500.00\n}"
+						},
+						"url": { "raw": "{{baseUrl}}/claims", "host": ["{{baseUrl}}"], "path": ["claims"] },
+						"description": "Validates policy in MySQL, checks coverage, inserts claim in MySQL, creates doc record in SQL Server, logs audit in PostgreSQL, sends email + webhook"
+					}
+				},
+				{
+					"name": "File Claim - Exceeds Coverage (400)",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"policyId\": 1,\n  \"claimantName\": \"John Smith\",\n  \"claimType\": \"ACCIDENT\",\n  \"description\": \"Major accident claim\",\n  \"claimAmount\": 999999.00\n}"
+						},
+						"url": { "raw": "{{baseUrl}}/claims", "host": ["{{baseUrl}}"], "path": ["claims"] },
+						"description": "Test: claim amount exceeds policy coverage limit"
+					}
+				},
+				{
+					"name": "Approve a Claim",
+					"request": {
+						"method": "PUT",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": { "mode": "raw", "raw": "{\n  \"status\": \"APPROVED\",\n  \"approvedAmount\": 7500.00\n}" },
+						"url": { "raw": "{{baseUrl}}/claims/4/status", "host": ["{{baseUrl}}"], "path": ["claims", "4", "status"] },
+						"description": "Approves claim in MySQL, generates approval PDF to Azure File Share, records doc in SQL Server, logs audit in PostgreSQL, sends notification"
+					}
+				},
+				{
+					"name": "Reject a Claim",
+					"request": {
+						"method": "PUT",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": { "mode": "raw", "raw": "{\n  \"status\": \"REJECTED\",\n  \"reason\": \"Claim does not meet policy terms\"\n}" },
+						"url": { "raw": "{{baseUrl}}/claims/5/status", "host": ["{{baseUrl}}"], "path": ["claims", "5", "status"] },
+						"description": "Rejects claim in MySQL + logs with reason in PostgreSQL + sends notification"
+					}
+				},
+				{
+					"name": "Move Claim to Under Review",
+					"request": {
+						"method": "PUT",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": { "mode": "raw", "raw": "{\n  \"status\": \"UNDER_REVIEW\"\n}" },
+						"url": { "raw": "{{baseUrl}}/claims/3/status", "host": ["{{baseUrl}}"], "path": ["claims", "3", "status"] },
+						"description": "Changes claim status to UNDER_REVIEW in MySQL + logs in PostgreSQL"
+					}
+				}
+			]
+		},
+		{
+			"name": "Documents (Azure File Share)",
+			"item": [
+				{
+					"name": "List Claim Documents",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{baseUrl}}/claims/1/documents", "host": ["{{baseUrl}}"], "path": ["claims", "1", "documents"] },
+						"description": "Lists all documents for a claim from SQL Server Documents DB"
+					}
+				},
+				{
+					"name": "Upload Document (PDF)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "Content-Type", "value": "application/pdf" },
+							{ "key": "x-file-name", "value": "accident-report.pdf" },
+							{ "key": "x-uploaded-by", "value": "john.smith" }
+						],
+						"body": { "mode": "raw", "raw": "<<PDF binary content>>" },
+						"url": { "raw": "{{baseUrl}}/claims/1/documents", "host": ["{{baseUrl}}"], "path": ["claims", "1", "documents"] },
+						"description": "Uploads PDF to Azure File Share + records metadata in SQL Server + logs audit in PostgreSQL"
+					}
+				},
+				{
+					"name": "Download Document (PDF)",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{baseUrl}}/claims/1/documents/1", "host": ["{{baseUrl}}"], "path": ["claims", "1", "documents", "1"] },
+						"description": "Gets document metadata from SQL Server, reads PDF from Azure File Share, returns as download"
+					}
+				}
+			]
+		},
+		{
+			"name": "Dashboard & Reports",
+			"item": [
+				{
+					"name": "Dashboard Statistics (6-DB Query)",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{baseUrl}}/dashboard/stats", "host": ["{{baseUrl}}"], "path": ["dashboard", "stats"] },
+						"description": "Aggregates data from all 3 databases: claims stats (MySQL), audit activity (PostgreSQL), document counts (SQL Server)"
+					}
+				},
+				{
+					"name": "Monthly Report",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{baseUrl}}/reports/monthly?month=2026-04", "host": ["{{baseUrl}}"], "path": ["reports", "monthly"], "query": [{"key":"month","value":"2026-04"}] },
+						"description": "Monthly claims summary, new policies, and top claimants from MySQL"
+					}
+				}
+			]
+		},
+		{
+			"name": "Audit Trail",
+			"item": [
+				{
+					"name": "Get Audit Log (All)",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{baseUrl}}/audit?days=30", "host": ["{{baseUrl}}"], "path": ["audit"], "query": [{"key":"days","value":"30"}] },
+						"description": "Query audit trail from PostgreSQL Audit DB"
+					}
+				},
+				{
+					"name": "Get Audit Log - Claims Only",
+					"request": {
+						"method": "GET",
+						"url": { "raw": "{{baseUrl}}/audit?entityType=CLAIM&days=7", "host": ["{{baseUrl}}"], "path": ["audit"], "query": [{"key":"entityType","value":"CLAIM"},{"key":"days","value":"7"}] },
+						"description": "Filter audit trail to claims-only from last 7 days"
+					}
+				}
+			]
+		}
+	]
+}

@@ -1,0 +1,17 @@
+# MuleSoft
+target/
+.mule/
+.classpath
+.project
+.settings/
+*.jar
+*.class
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.DS_Store
+
+# OS
+Thumbs.db

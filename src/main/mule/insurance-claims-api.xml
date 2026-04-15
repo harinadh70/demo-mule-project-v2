@@ -1,0 +1,1514 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:db="http://www.mulesoft.org/schema/mule/db"
+      xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xmlns:file="http://www.mulesoft.org/schema/mule/file"
+      xmlns:email="http://www.mulesoft.org/schema/mule/email"
+      xmlns:apikit="http://www.mulesoft.org/schema/mule/mule-apikit"
+      xmlns:batch="http://www.mulesoft.org/schema/mule/batch"
+      xmlns:os="http://www.mulesoft.org/schema/mule/os"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd
+        http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+        http://www.mulesoft.org/schema/mule/file http://www.mulesoft.org/schema/mule/file/current/mule-file.xsd
+        http://www.mulesoft.org/schema/mule/email http://www.mulesoft.org/schema/mule/email/current/mule-email.xsd
+        http://www.mulesoft.org/schema/mule/mule-apikit http://www.mulesoft.org/schema/mule/mule-apikit/current/mule-apikit.xsd
+        http://www.mulesoft.org/schema/mule/batch http://www.mulesoft.org/schema/mule/batch/current/mule-batch.xsd
+        http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd">
+
+    <!-- ================================================================= -->
+    <!-- GLOBAL PROPERTIES & CONFIGURATION                                  -->
+    <!-- ================================================================= -->
+
+    <!-- Default environment (override via -Dmule.env=sit|uat|preprod|prod) -->
+    <global-property doc:name="Environment" name="mule.env" value="dev"/>
+
+    <!-- Load environment-specific YAML config -->
+    <configuration-properties doc:name="Configuration properties" file="config/${mule.env}-config.yaml"/>
+
+    <!-- ================================================================= -->
+    <!-- CONNECTOR CONFIGURATIONS                                           -->
+    <!-- ================================================================= -->
+
+    <!-- HTTP Listener Configuration -->
+    <http:listener-config name="insurance-api-config" doc:name="HTTP Listener config">
+        <http:listener-connection host="${http.host}" port="${http.port}"/>
+    </http:listener-config>
+
+    <!-- HTTP Request Configuration (External notification service) -->
+    <http:request-config name="notification-service-config" doc:name="Notification Service">
+        <http:request-connection host="${notification.host}" port="${notification.port}" protocol="HTTPS">
+            <http:default-headers>
+                <http:default-header key="X-API-Key" value="${notification.apiKey}"/>
+                <http:default-header key="Content-Type" value="application/json"/>
+            </http:default-headers>
+        </http:request-connection>
+    </http:request-config>
+
+    <!-- APIkit Router Configuration -->
+    <apikit:config name="insurance-api-router" raml="api/insurance-claims-api.raml" outboundHeadersMapName="outboundHeaders" httpStatusVarName="httpStatus" doc:name="Router"/>
+
+    <!-- PRIMARY Database: Claims operational database (MySQL) -->
+    <db:config name="claims-db-config" doc:name="Claims Database Config">
+        <db:my-sql-connection host="${db.claims.host}" port="${db.claims.port}"
+                              database="${db.claims.name}"
+                              user="${db.claims.user}" password="${db.claims.password}">
+            <db:connection-properties>
+                <db:connection-property key="useSSL" value="true"/>
+                <db:connection-property key="requireSSL" value="true"/>
+                <db:connection-property key="serverTimezone" value="UTC"/>
+                <db:connection-property key="allowPublicKeyRetrieval" value="true"/>
+            </db:connection-properties>
+        </db:my-sql-connection>
+    </db:config>
+
+    <!-- SECONDARY Database: Audit & reporting database (PostgreSQL) -->
+    <db:config name="audit-db-config" doc:name="Audit Database Config">
+        <db:generic-connection url="${db.audit.url}"
+                               driverClassName="org.postgresql.Driver"
+                               user="${db.audit.user}"
+                               password="${db.audit.password}">
+            <db:connection-properties>
+                <db:connection-property key="sslmode" value="require"/>
+            </db:connection-properties>
+        </db:generic-connection>
+    </db:config>
+
+    <!-- TERTIARY Database: Document metadata store (SQL Server) -->
+    <db:config name="documents-db-config" doc:name="Documents Database Config">
+        <db:mssql-connection host="${db.documents.host}" port="${db.documents.port}"
+                              databaseName="${db.documents.name}"
+                              user="${db.documents.user}" password="${db.documents.password}">
+            <db:connection-properties>
+                <db:connection-property key="encrypt" value="true"/>
+                <db:connection-property key="trustServerCertificate" value="false"/>
+            </db:connection-properties>
+        </db:mssql-connection>
+    </db:config>
+
+    <!-- Azure File Share / Storage Account Configuration -->
+    <file:config name="azure-fileshare-config" doc:name="Azure File Share Config">
+        <file:connection workingDir="${azure.fileshare.basePath}"/>
+    </file:config>
+
+    <!-- Email (SMTP) Configuration for notifications -->
+    <email:smtp-config name="email-smtp-config" doc:name="Email SMTP Config">
+        <email:smtps-connection host="${email.smtp.host}" port="${email.smtp.port}"
+                                 user="${email.smtp.user}" password="${email.smtp.password}">
+            <email:tls-context>
+                <email:trust-store insecure="false"/>
+            </email:tls-context>
+        </email:smtps-connection>
+    </email:smtp-config>
+
+    <!-- Object Store for caching -->
+    <os:object-store name="claims-cache" doc:name="Claims Cache"
+                      entryTtl="30" entryTtlUnit="MINUTES" maxEntries="500"/>
+
+    <!-- ================================================================= -->
+    <!-- MAIN API ROUTER                                                    -->
+    <!-- ================================================================= -->
+
+    <flow name="insurance-claims-api-main">
+        <http:listener doc:name="Listener" config-ref="insurance-api-config" path="/api/v1/*"/>
+        <apikit:router doc:name="APIkit Router" config-ref="insurance-api-router"/>
+        <error-handler>
+            <on-error-propagate type="APIKIT:BAD_REQUEST" doc:name="On Error Propagate">
+                <set-variable variableName="httpStatus" value="400" doc:name="Set 400"/>
+                <flow-ref name="audit-error-sub-flow" doc:name="Audit Error"/>
+                <ee:transform doc:name="400 Bad Request">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ success: false, error: "Bad request: " ++ error.description, correlationId: correlationId }]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+            </on-error-propagate>
+            <on-error-propagate type="APIKIT:NOT_FOUND" doc:name="On Error Propagate">
+                <set-variable variableName="httpStatus" value="404" doc:name="Set 404"/>
+                <flow-ref name="audit-error-sub-flow" doc:name="Audit Error"/>
+                <ee:transform doc:name="404 Not Found">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ success: false, error: "Resource not found", correlationId: correlationId }]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+            </on-error-propagate>
+            <on-error-propagate type="APIKIT:METHOD_NOT_ALLOWED" doc:name="On Error Propagate">
+                <set-variable variableName="httpStatus" value="405" doc:name="Set 405"/>
+                <ee:transform doc:name="405 Method Not Allowed">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ success: false, error: "Method not allowed", correlationId: correlationId }]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+            </on-error-propagate>
+            <on-error-propagate type="DB:CONNECTIVITY" doc:name="DB Connection Error">
+                <set-variable variableName="httpStatus" value="503" doc:name="Set 503"/>
+                <flow-ref name="audit-error-sub-flow" doc:name="Audit Error"/>
+                <ee:transform doc:name="503 Service Unavailable">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ success: false, error: "Database temporarily unavailable. Please retry.", correlationId: correlationId }]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+            </on-error-propagate>
+            <on-error-propagate type="ANY" doc:name="On Error Propagate">
+                <set-variable variableName="httpStatus" value="500" doc:name="Set 500"/>
+                <flow-ref name="audit-error-sub-flow" doc:name="Audit Error"/>
+                <ee:transform doc:name="500 Internal Server Error">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ success: false, error: "Internal server error", correlationId: correlationId }]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+            </on-error-propagate>
+        </error-handler>
+    </flow>
+
+    <!-- ================================================================= -->
+    <!-- POLICY ENDPOINTS                                                   -->
+    <!-- ================================================================= -->
+
+    <!-- Get All Policies (with pagination) -->
+    <flow name="get:\policies:insurance-api-router">
+        <logger level="INFO" doc:name="Log" message="Fetching all insurance policies"/>
+        <set-variable variableName="page" value="#[attributes.queryParams.page default '1']" doc:name="Set page"/>
+        <set-variable variableName="pageSize" value="#[attributes.queryParams.pageSize default '20']" doc:name="Set pageSize"/>
+        <db:select doc:name="Select policies with pagination" config-ref="claims-db-config">
+            <db:sql>SELECT policy_id, policy_number, holder_name, holder_email,
+                           policy_type, coverage_amount, premium, status,
+                           effective_date, expiration_date, created_at
+                    FROM policies WHERE status != 'DELETED'
+                    ORDER BY created_at DESC
+                    LIMIT :pageSize OFFSET :offset</db:sql>
+            <db:input-parameters><![CDATA[#[{
+                pageSize: vars.pageSize as Number,
+                offset: ((vars.page as Number) - 1) * (vars.pageSize as Number)
+            }]]]></db:input-parameters>
+        </db:select>
+        <set-variable variableName="policies" value="#[payload]" doc:name="Save policies"/>
+        <!-- Get total count for pagination -->
+        <db:select doc:name="Count total policies" config-ref="claims-db-config">
+            <db:sql>SELECT COUNT(*) as total FROM policies WHERE status != 'DELETED'</db:sql>
+        </db:select>
+        <flow-ref name="audit-access-sub-flow" doc:name="Audit Access"/>
+        <ee:transform doc:name="Transform to JSON">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  success: true,
+  count: sizeOf(vars.policies),
+  totalCount: payload[0].total,
+  page: vars.page as Number,
+  pageSize: vars.pageSize as Number,
+  totalPages: ceil(payload[0].total / (vars.pageSize as Number)),
+  policies: vars.policies map {
+    policyId: $.policy_id,
+    policyNumber: $.policy_number,
+    holderName: $.holder_name,
+    holderEmail: $.holder_email,
+    policyType: $.policy_type,
+    coverageAmount: $.coverage_amount,
+    premium: $.premium,
+    status: $.status,
+    effectiveDate: $.effective_date,
+    expirationDate: $.expiration_date
+  }
+}]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+    </flow>
+
+    <!-- Get Policy by ID (with claims history + documents from separate DBs) -->
+    <flow name="get:\policies\(policyId):insurance-api-router">
+        <logger level="INFO" doc:name="Log" message="#['Fetching policy: ' ++ attributes.uriParams.policyId]"/>
+        <scatter-gather doc:name="Fetch policy data from multiple databases">
+            <!-- Route 1: Policy details from Claims DB (MySQL) -->
+            <route>
+                <db:select doc:name="Select policy from Claims DB" config-ref="claims-db-config">
+                    <db:sql>SELECT * FROM policies WHERE policy_id = :policyId</db:sql>
+                    <db:input-parameters><![CDATA[#[{ policyId: attributes.uriParams.policyId }]]]></db:input-parameters>
+                </db:select>
+            </route>
+            <!-- Route 2: Claims history for this policy from Claims DB (MySQL) -->
+            <route>
+                <db:select doc:name="Select claims for policy" config-ref="claims-db-config">
+                    <db:sql>SELECT claim_id, claim_number, claim_type, claim_amount,
+                                   approved_amount, status, filed_date, resolved_date
+                            FROM claims WHERE policy_id = :policyId ORDER BY filed_date DESC</db:sql>
+                    <db:input-parameters><![CDATA[#[{ policyId: attributes.uriParams.policyId }]]]></db:input-parameters>
+                </db:select>
+            </route>
+            <!-- Route 3: Audit trail from Audit DB (PostgreSQL) -->
+            <route>
+                <db:select doc:name="Select audit trail from Audit DB" config-ref="audit-db-config">
+                    <db:sql>SELECT action, actor, details, created_at
+                            FROM audit_log
+                            WHERE entity_type = 'POLICY' AND entity_id = :policyId
+                            ORDER BY created_at DESC LIMIT 10</db:sql>
+                    <db:input-parameters><![CDATA[#[{ policyId: attributes.uriParams.policyId }]]]></db:input-parameters>
+                </db:select>
+            </route>
+            <!-- Route 4: Document metadata from Documents DB (SQL Server) -->
+            <route>
+                <db:select doc:name="Select documents from Documents DB" config-ref="documents-db-config">
+                    <db:sql>SELECT document_id, document_name, document_type, file_path,
+                                   file_size_bytes, uploaded_by, uploaded_at
+                            FROM claim_documents
+                            WHERE policy_id = :policyId AND is_deleted = 0
+                            ORDER BY uploaded_at DESC</db:sql>
+                    <db:input-parameters><![CDATA[#[{ policyId: attributes.uriParams.policyId }]]]></db:input-parameters>
+                </db:select>
+            </route>
+        </scatter-gather>
+        <choice doc:name="Check if policy found">
+            <when expression="#[sizeOf(payload.'0'.payload) > 0]">
+                <flow-ref name="audit-access-sub-flow" doc:name="Audit Access"/>
+                <ee:transform doc:name="Transform policy with full details">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+var p = payload."0".payload[0]
+---
+{
+  success: true,
+  policy: {
+    policyId: p.policy_id,
+    policyNumber: p.policy_number,
+    holderName: p.holder_name,
+    holderEmail: p.holder_email,
+    policyType: p.policy_type,
+    coverageAmount: p.coverage_amount,
+    premium: p.premium,
+    status: p.status,
+    effectiveDate: p.effective_date,
+    expirationDate: p.expiration_date
+  },
+  claimsHistory: payload."1".payload map {
+    claimId: $.claim_id,
+    claimNumber: $.claim_number,
+    claimType: $.claim_type,
+    claimAmount: $.claim_amount,
+    approvedAmount: $.approved_amount,
+    status: $.status,
+    filedDate: $.filed_date,
+    resolvedDate: $.resolved_date
+  },
+  auditTrail: payload."2".payload map {
+    action: $.action,
+    actor: $.actor,
+    details: $.details,
+    timestamp: $.created_at
+  },
+  documents: payload."3".payload map {
+    documentId: $.document_id,
+    documentName: $.document_name,
+    documentType: $.document_type,
+    filePath: $.file_path,
+    fileSizeBytes: $.file_size_bytes,
+    uploadedBy: $.uploaded_by,
+    uploadedAt: $.uploaded_at
+  }
+}]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+            </when>
+            <otherwise>
+                <set-variable variableName="httpStatus" value="404" doc:name="Set 404"/>
+                <ee:transform doc:name="404 Not Found">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ success: false, error: "Policy not found" }]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+            </otherwise>
+        </choice>
+    </flow>
+
+    <!-- Create New Policy (with audit logging + notification) -->
+    <flow name="post:\policies:application\json:insurance-api-router">
+        <logger level="INFO" doc:name="Log" message="Creating new insurance policy"/>
+        <ee:transform doc:name="Parse payload">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/java
+---
+payload]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+        <set-variable variableName="policyData" value="#[payload]" doc:name="Save policy data"/>
+        <!-- Insert into primary Claims DB -->
+        <db:insert doc:name="Insert policy into Claims DB" config-ref="claims-db-config">
+            <db:sql>INSERT INTO policies (policy_number, holder_name, holder_email, policy_type,
+                                          coverage_amount, premium, status, effective_date, expiration_date)
+                    VALUES (:policyNumber, :holderName, :holderEmail, :policyType,
+                            :coverageAmount, :premium, 'ACTIVE', :effectiveDate, :expirationDate)</db:sql>
+            <db:input-parameters><![CDATA[#[{
+                policyNumber: vars.policyData.policyNumber,
+                holderName: vars.policyData.holderName,
+                holderEmail: vars.policyData.holderEmail,
+                policyType: vars.policyData.policyType,
+                coverageAmount: vars.policyData.coverageAmount,
+                premium: vars.policyData.premium,
+                effectiveDate: vars.policyData.effectiveDate,
+                expirationDate: vars.policyData.expirationDate
+            }]]]></db:input-parameters>
+        </db:insert>
+        <!-- Get the newly created policy ID -->
+        <db:select doc:name="Get new policy ID" config-ref="claims-db-config">
+            <db:sql>SELECT LAST_INSERT_ID() as new_id</db:sql>
+        </db:select>
+        <set-variable variableName="newPolicyId" value="#[payload[0].new_id]" doc:name="Save new ID"/>
+        <!-- Log to Audit DB (PostgreSQL) -->
+        <db:insert doc:name="Insert audit log" config-ref="audit-db-config">
+            <db:sql>INSERT INTO audit_log (entity_type, entity_id, action, actor, details, created_at)
+                    VALUES ('POLICY', :entityId, 'CREATED', :actor,
+                            :details, NOW())</db:sql>
+            <db:input-parameters><![CDATA[#[{
+                entityId: vars.newPolicyId as String,
+                actor: vars.policyData.holderEmail default "system",
+                details: "Policy " ++ (vars.policyData.policyNumber default "") ++ " created. Type: " ++ (vars.policyData.policyType default "") ++ ", Coverage: $" ++ (vars.policyData.coverageAmount as String default "0")
+            }]]]></db:input-parameters>
+        </db:insert>
+        <!-- Send notification email -->
+        <flow-ref name="send-notification-sub-flow" doc:name="Send Email Notification"/>
+        <ee:transform doc:name="Success response">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  success: true,
+  message: "Policy created successfully",
+  policyId: vars.newPolicyId,
+  policyNumber: vars.policyData.policyNumber
+}]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+    </flow>
+
+    <!-- Update Policy -->
+    <flow name="put:\policies\(policyId):application\json:insurance-api-router">
+        <logger level="INFO" doc:name="Log" message="#['Updating policy: ' ++ attributes.uriParams.policyId]"/>
+        <ee:transform doc:name="Parse payload">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/java
+---
+payload]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+        <set-variable variableName="updateData" value="#[payload]" doc:name="Save update data"/>
+        <set-variable variableName="policyId" value="#[attributes.uriParams.policyId]" doc:name="Save policy ID"/>
+        <!-- Verify policy exists -->
+        <db:select doc:name="Check policy exists" config-ref="claims-db-config">
+            <db:sql>SELECT policy_id, status FROM policies WHERE policy_id = :policyId</db:sql>
+            <db:input-parameters><![CDATA[#[{ policyId: vars.policyId }]]]></db:input-parameters>
+        </db:select>
+        <choice doc:name="Policy exists?">
+            <when expression="#[sizeOf(payload) > 0]">
+                <db:update doc:name="Update policy" config-ref="claims-db-config">
+                    <db:sql>UPDATE policies SET holder_name = :holderName, holder_email = :holderEmail,
+                                                coverage_amount = :coverageAmount, premium = :premium,
+                                                updated_at = NOW()
+                            WHERE policy_id = :policyId</db:sql>
+                    <db:input-parameters><![CDATA[#[{
+                        policyId: vars.policyId,
+                        holderName: vars.updateData.holderName,
+                        holderEmail: vars.updateData.holderEmail,
+                        coverageAmount: vars.updateData.coverageAmount,
+                        premium: vars.updateData.premium
+                    }]]]></db:input-parameters>
+                </db:update>
+                <!-- Audit the update -->
+                <db:insert doc:name="Audit update" config-ref="audit-db-config">
+                    <db:sql>INSERT INTO audit_log (entity_type, entity_id, action, actor, details, created_at)
+                            VALUES ('POLICY', :entityId, 'UPDATED', 'api-user',
+                                    :details, NOW())</db:sql>
+                    <db:input-parameters><![CDATA[#[{
+                        entityId: vars.policyId as String,
+                        details: "Policy updated. New coverage: $" ++ (vars.updateData.coverageAmount as String default "0")
+                    }]]]></db:input-parameters>
+                </db:insert>
+                <ee:transform doc:name="Success response">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ success: true, message: "Policy updated successfully" }]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+            </when>
+            <otherwise>
+                <set-variable variableName="httpStatus" value="404" doc:name="Set 404"/>
+                <ee:transform doc:name="404 Not Found">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ success: false, error: "Policy not found" }]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+            </otherwise>
+        </choice>
+    </flow>
+
+    <!-- Delete (Soft Delete) Policy -->
+    <flow name="delete:\policies\(policyId):insurance-api-router">
+        <logger level="INFO" doc:name="Log" message="#['Deleting policy: ' ++ attributes.uriParams.policyId]"/>
+        <set-variable variableName="policyId" value="#[attributes.uriParams.policyId]" doc:name="Save policy ID"/>
+        <!-- Check if policy has open claims -->
+        <db:select doc:name="Check open claims" config-ref="claims-db-config">
+            <db:sql>SELECT COUNT(*) as open_claims FROM claims
+                    WHERE policy_id = :policyId AND status IN ('SUBMITTED', 'UNDER_REVIEW')</db:sql>
+            <db:input-parameters><![CDATA[#[{ policyId: vars.policyId }]]]></db:input-parameters>
+        </db:select>
+        <choice doc:name="Has open claims?">
+            <when expression="#[payload[0].open_claims > 0]">
+                <set-variable variableName="httpStatus" value="409" doc:name="Set 409"/>
+                <ee:transform doc:name="409 Conflict">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ success: false, error: "Cannot delete policy with open claims. Resolve all claims first." }]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+            </when>
+            <otherwise>
+                <db:update doc:name="Soft delete policy" config-ref="claims-db-config">
+                    <db:sql>UPDATE policies SET status = 'DELETED', updated_at = NOW() WHERE policy_id = :policyId</db:sql>
+                    <db:input-parameters><![CDATA[#[{ policyId: vars.policyId }]]]></db:input-parameters>
+                </db:update>
+                <db:insert doc:name="Audit deletion" config-ref="audit-db-config">
+                    <db:sql>INSERT INTO audit_log (entity_type, entity_id, action, actor, details, created_at)
+                            VALUES ('POLICY', :entityId, 'DELETED', 'api-user', 'Policy soft-deleted', NOW())</db:sql>
+                    <db:input-parameters><![CDATA[#[{ entityId: vars.policyId as String }]]]></db:input-parameters>
+                </db:insert>
+                <ee:transform doc:name="Success response">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ success: true, message: "Policy deleted successfully" }]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+            </otherwise>
+        </choice>
+    </flow>
+
+    <!-- ================================================================= -->
+    <!-- CLAIMS ENDPOINTS                                                   -->
+    <!-- ================================================================= -->
+
+    <!-- Get All Claims (with filtering) -->
+    <flow name="get:\claims:insurance-api-router">
+        <logger level="INFO" doc:name="Log" message="Fetching all insurance claims"/>
+        <set-variable variableName="statusFilter" value="#[attributes.queryParams.status default 'ALL']" doc:name="Set status filter"/>
+        <db:select doc:name="Select all claims with join" config-ref="claims-db-config">
+            <db:sql>SELECT c.claim_id, c.claim_number, c.policy_id, p.policy_number,
+                           c.claimant_name, c.claim_type, c.description, c.claim_amount,
+                           c.approved_amount, c.status, c.filed_date, c.resolved_date,
+                           p.holder_name, p.policy_type, p.coverage_amount
+                    FROM claims c
+                    JOIN policies p ON c.policy_id = p.policy_id
+                    WHERE (c.status = :statusFilter OR :statusFilter = 'ALL')
+                    ORDER BY c.filed_date DESC</db:sql>
+            <db:input-parameters><![CDATA[#[{ statusFilter: vars.statusFilter }]]]></db:input-parameters>
+        </db:select>
+        <flow-ref name="audit-access-sub-flow" doc:name="Audit Access"/>
+        <ee:transform doc:name="Transform to JSON">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  success: true,
+  count: sizeOf(payload),
+  filter: vars.statusFilter,
+  claims: payload map {
+    claimId: $.claim_id,
+    claimNumber: $.claim_number,
+    policyId: $.policy_id,
+    policyNumber: $.policy_number,
+    holderName: $.holder_name,
+    claimantName: $.claimant_name,
+    claimType: $.claim_type,
+    description: $.description,
+    claimAmount: $.claim_amount,
+    approvedAmount: $.approved_amount,
+    status: $.status,
+    filedDate: $.filed_date,
+    resolvedDate: $.resolved_date,
+    policyType: $.policy_type,
+    coverageAmount: $.coverage_amount
+  }
+}]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+    </flow>
+
+    <!-- File a New Claim (multi-DB validation + audit) -->
+    <flow name="post:\claims:application\json:insurance-api-router">
+        <logger level="INFO" doc:name="Log" message="Filing new insurance claim"/>
+        <ee:transform doc:name="Parse payload">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/java
+---
+payload]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+        <set-variable variableName="claimData" value="#[payload]" doc:name="Save claim data"/>
+        <!-- Validate policy exists AND is active in Claims DB -->
+        <db:select doc:name="Validate active policy" config-ref="claims-db-config">
+            <db:sql>SELECT policy_id, policy_number, status, coverage_amount, holder_name, holder_email
+                    FROM policies WHERE policy_id = :policyId AND status = 'ACTIVE'</db:sql>
+            <db:input-parameters><![CDATA[#[{ policyId: vars.claimData.policyId }]]]></db:input-parameters>
+        </db:select>
+        <choice doc:name="Policy valid?">
+            <when expression="#[sizeOf(payload) > 0]">
+                <set-variable variableName="policyInfo" value="#[payload[0]]" doc:name="Save policy info"/>
+                <!-- Check claim amount doesn't exceed coverage -->
+                <choice doc:name="Amount within coverage?">
+                    <when expression="#[vars.claimData.claimAmount &lt;= vars.policyInfo.coverage_amount]">
+                        <!-- Generate claim number -->
+                        <set-variable variableName="claimNumber" value="#['CLM-' ++ now() as String {format: 'yyyyMMddHHmmss'}]" doc:name="Generate claim number"/>
+                        <!-- Insert claim into Claims DB -->
+                        <db:insert doc:name="Insert claim" config-ref="claims-db-config">
+                            <db:sql>INSERT INTO claims (claim_number, policy_id, claimant_name, claim_type,
+                                                        description, claim_amount, status, filed_date)
+                                    VALUES (:claimNumber, :policyId, :claimantName, :claimType,
+                                            :description, :claimAmount, 'SUBMITTED', CURDATE())</db:sql>
+                            <db:input-parameters><![CDATA[#[{
+                                claimNumber: vars.claimNumber,
+                                policyId: vars.claimData.policyId,
+                                claimantName: vars.claimData.claimantName,
+                                claimType: vars.claimData.claimType,
+                                description: vars.claimData.description,
+                                claimAmount: vars.claimData.claimAmount
+                            }]]]></db:input-parameters>
+                        </db:insert>
+                        <!-- Get new claim ID -->
+                        <db:select doc:name="Get new claim ID" config-ref="claims-db-config">
+                            <db:sql>SELECT LAST_INSERT_ID() as new_id</db:sql>
+                        </db:select>
+                        <set-variable variableName="newClaimId" value="#[payload[0].new_id]" doc:name="Save new claim ID"/>
+                        <!-- Audit trail in PostgreSQL -->
+                        <db:insert doc:name="Audit claim creation" config-ref="audit-db-config">
+                            <db:sql>INSERT INTO audit_log (entity_type, entity_id, action, actor, details, created_at)
+                                    VALUES ('CLAIM', :entityId, 'FILED', :actor,
+                                            :details, NOW())</db:sql>
+                            <db:input-parameters><![CDATA[#[{
+                                entityId: vars.newClaimId as String,
+                                actor: vars.claimData.claimantName,
+                                details: "Claim " ++ vars.claimNumber ++ " filed. Amount: $" ++ (vars.claimData.claimAmount as String) ++ ", Type: " ++ (vars.claimData.claimType default "")
+                            }]]]></db:input-parameters>
+                        </db:insert>
+                        <!-- Create document record in SQL Server -->
+                        <db:insert doc:name="Create document placeholder in Documents DB" config-ref="documents-db-config">
+                            <db:sql>INSERT INTO claim_documents (policy_id, claim_id, document_name, document_type,
+                                                                  file_path, uploaded_by, uploaded_at)
+                                    VALUES (:policyId, :claimId, :docName, 'CLAIM_FORM',
+                                            :filePath, :uploadedBy, GETDATE())</db:sql>
+                            <db:input-parameters><![CDATA[#[{
+                                policyId: vars.claimData.policyId,
+                                claimId: vars.newClaimId,
+                                docName: "Claim_" ++ vars.claimNumber ++ "_form.pdf",
+                                filePath: "/claims/" ++ (vars.newClaimId as String) ++ "/Claim_" ++ vars.claimNumber ++ "_form.pdf",
+                                uploadedBy: vars.claimData.claimantName
+                            }]]]></db:input-parameters>
+                        </db:insert>
+                        <!-- Send email notification -->
+                        <set-variable variableName="notificationType" value="CLAIM_FILED" doc:name="Set notification type"/>
+                        <flow-ref name="send-notification-sub-flow" doc:name="Send Notification"/>
+                        <ee:transform doc:name="Success response">
+                            <ee:message>
+                                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  success: true,
+  message: "Claim filed successfully",
+  claimId: vars.newClaimId,
+  claimNumber: vars.claimNumber,
+  status: "SUBMITTED"
+}]]></ee:set-payload>
+                            </ee:message>
+                        </ee:transform>
+                    </when>
+                    <otherwise>
+                        <set-variable variableName="httpStatus" value="400" doc:name="Set 400"/>
+                        <ee:transform doc:name="Amount exceeds coverage">
+                            <ee:message>
+                                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  success: false,
+  error: "Claim amount ($" ++ (vars.claimData.claimAmount as String) ++ ") exceeds policy coverage ($" ++ (vars.policyInfo.coverage_amount as String) ++ ")"
+}]]></ee:set-payload>
+                            </ee:message>
+                        </ee:transform>
+                    </otherwise>
+                </choice>
+            </when>
+            <otherwise>
+                <set-variable variableName="httpStatus" value="400" doc:name="Set 400"/>
+                <ee:transform doc:name="400 Bad Request">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ success: false, error: "Policy not found or not active. Cannot file claim." }]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+            </otherwise>
+        </choice>
+    </flow>
+
+    <!-- Get Claim by ID (with documents from file share) -->
+    <flow name="get:\claims\(claimId):insurance-api-router">
+        <logger level="INFO" doc:name="Log" message="#['Fetching claim: ' ++ attributes.uriParams.claimId]"/>
+        <scatter-gather doc:name="Fetch claim from multiple sources">
+            <!-- Claim details from Claims DB -->
+            <route>
+                <db:select doc:name="Select claim by ID" config-ref="claims-db-config">
+                    <db:sql>SELECT c.*, p.policy_number, p.holder_name, p.holder_email, p.policy_type
+                            FROM claims c
+                            JOIN policies p ON c.policy_id = p.policy_id
+                            WHERE c.claim_id = :claimId</db:sql>
+                    <db:input-parameters><![CDATA[#[{ claimId: attributes.uriParams.claimId }]]]></db:input-parameters>
+                </db:select>
+            </route>
+            <!-- Documents from Documents DB (SQL Server) -->
+            <route>
+                <db:select doc:name="Select claim documents" config-ref="documents-db-config">
+                    <db:sql>SELECT document_id, document_name, document_type, file_path,
+                                   file_size_bytes, uploaded_by, uploaded_at
+                            FROM claim_documents
+                            WHERE claim_id = :claimId AND is_deleted = 0
+                            ORDER BY uploaded_at DESC</db:sql>
+                    <db:input-parameters><![CDATA[#[{ claimId: attributes.uriParams.claimId }]]]></db:input-parameters>
+                </db:select>
+            </route>
+            <!-- Audit trail from Audit DB (PostgreSQL) -->
+            <route>
+                <db:select doc:name="Select claim audit trail" config-ref="audit-db-config">
+                    <db:sql>SELECT action, actor, details, created_at
+                            FROM audit_log
+                            WHERE entity_type = 'CLAIM' AND entity_id = :claimId
+                            ORDER BY created_at DESC</db:sql>
+                    <db:input-parameters><![CDATA[#[{ claimId: attributes.uriParams.claimId as String }]]]></db:input-parameters>
+                </db:select>
+            </route>
+        </scatter-gather>
+        <choice doc:name="Check if found">
+            <when expression="#[sizeOf(payload.'0'.payload) > 0]">
+                <ee:transform doc:name="Transform claim with documents">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+var c = payload."0".payload[0]
+---
+{
+  success: true,
+  claim: {
+    claimId: c.claim_id,
+    claimNumber: c.claim_number,
+    policyNumber: c.policy_number,
+    holderName: c.holder_name,
+    holderEmail: c.holder_email,
+    policyType: c.policy_type,
+    claimantName: c.claimant_name,
+    claimType: c.claim_type,
+    description: c.description,
+    claimAmount: c.claim_amount,
+    approvedAmount: c.approved_amount,
+    status: c.status,
+    filedDate: c.filed_date,
+    resolvedDate: c.resolved_date
+  },
+  documents: payload."1".payload map {
+    documentId: $.document_id,
+    documentName: $.document_name,
+    documentType: $.document_type,
+    filePath: $.file_path,
+    fileSizeBytes: $.file_size_bytes,
+    uploadedBy: $.uploaded_by,
+    uploadedAt: $.uploaded_at
+  },
+  auditTrail: payload."2".payload map {
+    action: $.action,
+    actor: $.actor,
+    details: $.details,
+    timestamp: $.created_at
+  }
+}]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+            </when>
+            <otherwise>
+                <set-variable variableName="httpStatus" value="404" doc:name="Set 404"/>
+                <ee:transform doc:name="404 Not Found">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ success: false, error: "Claim not found" }]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+            </otherwise>
+        </choice>
+    </flow>
+
+    <!-- Update Claim Status (Approve/Reject) -->
+    <flow name="put:\claims\(claimId)\status:application\json:insurance-api-router">
+        <logger level="INFO" doc:name="Log" message="#['Updating claim status: ' ++ attributes.uriParams.claimId]"/>
+        <ee:transform doc:name="Parse payload">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/java
+---
+payload]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+        <set-variable variableName="statusData" value="#[payload]" doc:name="Save status data"/>
+        <set-variable variableName="claimId" value="#[attributes.uriParams.claimId]" doc:name="Save claim ID"/>
+        <choice doc:name="Check status action">
+            <when expression="#[vars.statusData.status == 'APPROVED']">
+                <db:update doc:name="Approve claim" config-ref="claims-db-config">
+                    <db:sql>UPDATE claims SET status = 'APPROVED', approved_amount = :approvedAmount,
+                                              resolved_date = CURDATE(), updated_at = NOW()
+                            WHERE claim_id = :claimId</db:sql>
+                    <db:input-parameters><![CDATA[#[{
+                        claimId: vars.claimId,
+                        approvedAmount: vars.statusData.approvedAmount
+                    }]]]></db:input-parameters>
+                </db:update>
+                <!-- Audit approval in PostgreSQL -->
+                <db:insert doc:name="Audit approval" config-ref="audit-db-config">
+                    <db:sql>INSERT INTO audit_log (entity_type, entity_id, action, actor, details, created_at)
+                            VALUES ('CLAIM', :entityId, 'APPROVED', 'claims-adjuster',
+                                    :details, NOW())</db:sql>
+                    <db:input-parameters><![CDATA[#[{
+                        entityId: vars.claimId as String,
+                        details: "Claim approved. Amount: $" ++ (vars.statusData.approvedAmount as String default "0")
+                    }]]]></db:input-parameters>
+                </db:insert>
+                <!-- Generate approval PDF and save to file share -->
+                <flow-ref name="generate-approval-pdf-sub-flow" doc:name="Generate Approval PDF"/>
+                <set-variable variableName="notificationType" value="CLAIM_APPROVED" doc:name="Set notification type"/>
+                <flow-ref name="send-notification-sub-flow" doc:name="Send Notification"/>
+                <ee:transform doc:name="Approved response">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ success: true, message: "Claim approved successfully", status: "APPROVED" }]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+            </when>
+            <when expression="#[vars.statusData.status == 'REJECTED']">
+                <db:update doc:name="Reject claim" config-ref="claims-db-config">
+                    <db:sql>UPDATE claims SET status = 'REJECTED', approved_amount = 0,
+                                              resolved_date = CURDATE(), updated_at = NOW()
+                            WHERE claim_id = :claimId</db:sql>
+                    <db:input-parameters><![CDATA[#[{ claimId: vars.claimId }]]]></db:input-parameters>
+                </db:update>
+                <!-- Audit rejection -->
+                <db:insert doc:name="Audit rejection" config-ref="audit-db-config">
+                    <db:sql>INSERT INTO audit_log (entity_type, entity_id, action, actor, details, created_at)
+                            VALUES ('CLAIM', :entityId, 'REJECTED', 'claims-adjuster',
+                                    :details, NOW())</db:sql>
+                    <db:input-parameters><![CDATA[#[{
+                        entityId: vars.claimId as String,
+                        details: "Claim rejected. Reason: " ++ (vars.statusData.reason default "Not specified")
+                    }]]]></db:input-parameters>
+                </db:insert>
+                <set-variable variableName="notificationType" value="CLAIM_REJECTED" doc:name="Set notification type"/>
+                <flow-ref name="send-notification-sub-flow" doc:name="Send Notification"/>
+                <ee:transform doc:name="Rejected response">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ success: true, message: "Claim rejected", status: "REJECTED" }]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+            </when>
+            <when expression="#[vars.statusData.status == 'UNDER_REVIEW']">
+                <db:update doc:name="Set under review" config-ref="claims-db-config">
+                    <db:sql>UPDATE claims SET status = 'UNDER_REVIEW', updated_at = NOW()
+                            WHERE claim_id = :claimId</db:sql>
+                    <db:input-parameters><![CDATA[#[{ claimId: vars.claimId }]]]></db:input-parameters>
+                </db:update>
+                <db:insert doc:name="Audit review start" config-ref="audit-db-config">
+                    <db:sql>INSERT INTO audit_log (entity_type, entity_id, action, actor, details, created_at)
+                            VALUES ('CLAIM', :entityId, 'REVIEW_STARTED', 'claims-adjuster',
+                                    'Claim moved to under review', NOW())</db:sql>
+                    <db:input-parameters><![CDATA[#[{ entityId: vars.claimId as String }]]]></db:input-parameters>
+                </db:insert>
+                <ee:transform doc:name="Under review response">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ success: true, message: "Claim moved to under review", status: "UNDER_REVIEW" }]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+            </when>
+            <otherwise>
+                <set-variable variableName="httpStatus" value="400" doc:name="Set 400"/>
+                <ee:transform doc:name="400 Invalid Status">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ success: false, error: "Invalid status. Use APPROVED, REJECTED, or UNDER_REVIEW." }]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+            </otherwise>
+        </choice>
+    </flow>
+
+    <!-- ================================================================= -->
+    <!-- DOCUMENT ENDPOINTS (Azure File Share)                              -->
+    <!-- ================================================================= -->
+
+    <!-- Upload Document for a Claim (PDF to Azure File Share) -->
+    <flow name="post:\claims\(claimId)\documents:insurance-api-router">
+        <logger level="INFO" doc:name="Log" message="#['Uploading document for claim: ' ++ attributes.uriParams.claimId]"/>
+        <set-variable variableName="claimId" value="#[attributes.uriParams.claimId]" doc:name="Save claim ID"/>
+        <set-variable variableName="fileName" value="#[attributes.headers.'x-file-name' default 'document.pdf']" doc:name="Get filename"/>
+        <set-variable variableName="fileContent" value="#[payload]" doc:name="Save file content"/>
+        <!-- Verify claim exists -->
+        <db:select doc:name="Verify claim exists" config-ref="claims-db-config">
+            <db:sql>SELECT claim_id, policy_id, claim_number FROM claims WHERE claim_id = :claimId</db:sql>
+            <db:input-parameters><![CDATA[#[{ claimId: vars.claimId }]]]></db:input-parameters>
+        </db:select>
+        <choice doc:name="Claim exists?">
+            <when expression="#[sizeOf(payload) > 0]">
+                <set-variable variableName="claimInfo" value="#[payload[0]]" doc:name="Save claim info"/>
+                <set-variable variableName="filePath" value="#['/claims/' ++ (vars.claimId as String) ++ '/' ++ vars.fileName]" doc:name="Build file path"/>
+                <!-- Write file to Azure File Share -->
+                <file:write doc:name="Write PDF to Azure File Share"
+                            config-ref="azure-fileshare-config"
+                            path="#[vars.filePath]"
+                            mode="CREATE_NEW">
+                    <file:content>#[vars.fileContent]</file:content>
+                </file:write>
+                <!-- Record in Documents DB (SQL Server) -->
+                <db:insert doc:name="Record document metadata" config-ref="documents-db-config">
+                    <db:sql>INSERT INTO claim_documents (policy_id, claim_id, document_name, document_type,
+                                                          file_path, file_size_bytes, uploaded_by, uploaded_at)
+                            VALUES (:policyId, :claimId, :docName, :docType,
+                                    :filePath, :fileSize, :uploadedBy, GETDATE())</db:sql>
+                    <db:input-parameters><![CDATA[#[{
+                        policyId: vars.claimInfo.policy_id,
+                        claimId: vars.claimId,
+                        docName: vars.fileName,
+                        docType: if (vars.fileName endsWith ".pdf") "PDF"
+                                 else if (vars.fileName endsWith ".jpg" or vars.fileName endsWith ".png") "IMAGE"
+                                 else "OTHER",
+                        filePath: vars.filePath,
+                        fileSize: sizeOf(vars.fileContent),
+                        uploadedBy: attributes.headers.'x-uploaded-by' default "api-user"
+                    }]]]></db:input-parameters>
+                </db:insert>
+                <!-- Audit the upload -->
+                <db:insert doc:name="Audit document upload" config-ref="audit-db-config">
+                    <db:sql>INSERT INTO audit_log (entity_type, entity_id, action, actor, details, created_at)
+                            VALUES ('DOCUMENT', :entityId, 'UPLOADED', :actor,
+                                    :details, NOW())</db:sql>
+                    <db:input-parameters><![CDATA[#[{
+                        entityId: vars.claimId as String,
+                        actor: attributes.headers.'x-uploaded-by' default "api-user",
+                        details: "Document uploaded: " ++ vars.fileName ++ " for claim " ++ (vars.claimInfo.claim_number default "")
+                    }]]]></db:input-parameters>
+                </db:insert>
+                <ee:transform doc:name="Upload success">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  success: true,
+  message: "Document uploaded successfully",
+  document: {
+    fileName: vars.fileName,
+    filePath: vars.filePath,
+    claimId: vars.claimId,
+    claimNumber: vars.claimInfo.claim_number
+  }
+}]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+            </when>
+            <otherwise>
+                <set-variable variableName="httpStatus" value="404" doc:name="Set 404"/>
+                <ee:transform doc:name="Claim not found">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ success: false, error: "Claim not found" }]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+            </otherwise>
+        </choice>
+    </flow>
+
+    <!-- Download Document (read PDF from Azure File Share) -->
+    <flow name="get:\claims\(claimId)\documents\(documentId):insurance-api-router">
+        <logger level="INFO" doc:name="Log" message="#['Downloading document: ' ++ attributes.uriParams.documentId]"/>
+        <set-variable variableName="documentId" value="#[attributes.uriParams.documentId]" doc:name="Save doc ID"/>
+        <!-- Get document metadata from SQL Server -->
+        <db:select doc:name="Get document metadata" config-ref="documents-db-config">
+            <db:sql>SELECT document_id, document_name, document_type, file_path
+                    FROM claim_documents
+                    WHERE document_id = :documentId AND claim_id = :claimId AND is_deleted = 0</db:sql>
+            <db:input-parameters><![CDATA[#[{
+                documentId: vars.documentId,
+                claimId: attributes.uriParams.claimId
+            }]]]></db:input-parameters>
+        </db:select>
+        <choice doc:name="Document exists?">
+            <when expression="#[sizeOf(payload) > 0]">
+                <set-variable variableName="docMeta" value="#[payload[0]]" doc:name="Save document metadata"/>
+                <!-- Read file from Azure File Share -->
+                <file:read doc:name="Read PDF from Azure File Share"
+                           config-ref="azure-fileshare-config"
+                           path="#[vars.docMeta.file_path]"/>
+                <set-variable variableName="httpStatus" value="200" doc:name="Set 200"/>
+                <set-variable variableName="outboundHeaders" value="#[{
+                    'Content-Type': 'application/pdf',
+                    'Content-Disposition': 'attachment; filename=\"' ++ vars.docMeta.document_name ++ '\"'
+                }]" doc:name="Set response headers"/>
+            </when>
+            <otherwise>
+                <set-variable variableName="httpStatus" value="404" doc:name="Set 404"/>
+                <ee:transform doc:name="Document not found">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ success: false, error: "Document not found" }]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+            </otherwise>
+        </choice>
+    </flow>
+
+    <!-- List Documents for a Claim -->
+    <flow name="get:\claims\(claimId)\documents:insurance-api-router">
+        <logger level="INFO" doc:name="Log" message="#['Listing documents for claim: ' ++ attributes.uriParams.claimId]"/>
+        <db:select doc:name="Select claim documents" config-ref="documents-db-config">
+            <db:sql>SELECT document_id, document_name, document_type, file_path,
+                           file_size_bytes, uploaded_by, uploaded_at
+                    FROM claim_documents
+                    WHERE claim_id = :claimId AND is_deleted = 0
+                    ORDER BY uploaded_at DESC</db:sql>
+            <db:input-parameters><![CDATA[#[{ claimId: attributes.uriParams.claimId }]]]></db:input-parameters>
+        </db:select>
+        <ee:transform doc:name="Transform documents list">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  success: true,
+  count: sizeOf(payload),
+  claimId: attributes.uriParams.claimId,
+  documents: payload map {
+    documentId: $.document_id,
+    documentName: $.document_name,
+    documentType: $.document_type,
+    filePath: $.file_path,
+    fileSizeBytes: $.file_size_bytes,
+    uploadedBy: $.uploaded_by,
+    uploadedAt: $.uploaded_at,
+    downloadUrl: "/api/v1/claims/" ++ (attributes.uriParams.claimId as String) ++ "/documents/" ++ ($.document_id as String)
+  }
+}]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+    </flow>
+
+    <!-- ================================================================= -->
+    <!-- DASHBOARD & REPORTS                                                -->
+    <!-- ================================================================= -->
+
+    <!-- Claims Dashboard Stats (multi-database aggregation) -->
+    <flow name="get:\dashboard\stats:insurance-api-router">
+        <logger level="INFO" doc:name="Log" message="Fetching claims dashboard statistics"/>
+        <scatter-gather doc:name="Aggregate stats from multiple databases">
+            <!-- Route 1: Total claims from Claims DB -->
+            <route>
+                <db:select doc:name="Total claims" config-ref="claims-db-config">
+                    <db:sql>SELECT COUNT(*) as total_claims FROM claims</db:sql>
+                </db:select>
+            </route>
+            <!-- Route 2: Claims by status from Claims DB -->
+            <route>
+                <db:select doc:name="Claims by status" config-ref="claims-db-config">
+                    <db:sql>SELECT status, COUNT(*) as count, COALESCE(SUM(claim_amount), 0) as total_amount
+                            FROM claims GROUP BY status</db:sql>
+                </db:select>
+            </route>
+            <!-- Route 3: Financial totals from Claims DB -->
+            <route>
+                <db:select doc:name="Financial totals" config-ref="claims-db-config">
+                    <db:sql>SELECT COALESCE(SUM(claim_amount), 0) as total_claimed,
+                                   COALESCE(SUM(approved_amount), 0) as total_approved,
+                                   COALESCE(AVG(claim_amount), 0) as avg_claim
+                            FROM claims</db:sql>
+                </db:select>
+            </route>
+            <!-- Route 4: Active policies from Claims DB -->
+            <route>
+                <db:select doc:name="Active policies" config-ref="claims-db-config">
+                    <db:sql>SELECT COUNT(*) as active_policies,
+                                   COALESCE(SUM(coverage_amount), 0) as total_coverage,
+                                   COALESCE(SUM(premium), 0) as total_premiums
+                            FROM policies WHERE status = 'ACTIVE'</db:sql>
+                </db:select>
+            </route>
+            <!-- Route 5: Recent audit activity from Audit DB (PostgreSQL) -->
+            <route>
+                <db:select doc:name="Recent audit activity" config-ref="audit-db-config">
+                    <db:sql>SELECT action, COUNT(*) as count
+                            FROM audit_log
+                            WHERE created_at >= NOW() - INTERVAL '7 days'
+                            GROUP BY action ORDER BY count DESC</db:sql>
+                </db:select>
+            </route>
+            <!-- Route 6: Document counts from Documents DB (SQL Server) -->
+            <route>
+                <db:select doc:name="Document statistics" config-ref="documents-db-config">
+                    <db:sql>SELECT COUNT(*) as total_documents,
+                                   COALESCE(SUM(file_size_bytes), 0) as total_storage_bytes,
+                                   COUNT(DISTINCT claim_id) as claims_with_docs
+                            FROM claim_documents WHERE is_deleted = 0</db:sql>
+                </db:select>
+            </route>
+        </scatter-gather>
+        <ee:transform doc:name="Transform dashboard">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  success: true,
+  dashboard: {
+    totalClaims: payload."0".payload[0].total_claims,
+    claimsByStatus: payload."1".payload reduce ((item, acc = {}) ->
+      acc ++ { (item.status): { count: item.count, totalAmount: item.total_amount } }
+    ),
+    financials: {
+      totalClaimed: payload."2".payload[0].total_claimed,
+      totalApproved: payload."2".payload[0].total_approved,
+      averageClaim: payload."2".payload[0].avg_claim,
+      approvalRate: if (payload."2".payload[0].total_claimed > 0)
+                      (payload."2".payload[0].total_approved / payload."2".payload[0].total_claimed * 100)
+                    else 0
+    },
+    policies: {
+      activePolicies: payload."3".payload[0].active_policies,
+      totalCoverage: payload."3".payload[0].total_coverage,
+      totalPremiums: payload."3".payload[0].total_premiums
+    },
+    recentActivity: payload."4".payload map {
+      action: $.action,
+      count: $.count
+    },
+    documents: {
+      totalDocuments: payload."5".payload[0].total_documents,
+      totalStorageBytes: payload."5".payload[0].total_storage_bytes,
+      totalStorageMB: payload."5".payload[0].total_storage_bytes / 1048576,
+      claimsWithDocuments: payload."5".payload[0].claims_with_docs
+    }
+  }
+}]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+    </flow>
+
+    <!-- Monthly Report (Stored Procedure calls) -->
+    <flow name="get:\reports\monthly:insurance-api-router">
+        <logger level="INFO" doc:name="Log" message="Generating monthly claims report"/>
+        <set-variable variableName="month" value="#[attributes.queryParams.month default now() as String {format: 'yyyy-MM'}]" doc:name="Set month"/>
+        <scatter-gather doc:name="Gather report data">
+            <route>
+                <db:select doc:name="Monthly claims summary" config-ref="claims-db-config">
+                    <db:sql>SELECT DATE_FORMAT(filed_date, '%Y-%m') as month,
+                                   claim_type, COUNT(*) as count,
+                                   SUM(claim_amount) as total_amount,
+                                   SUM(approved_amount) as total_approved
+                            FROM claims
+                            WHERE DATE_FORMAT(filed_date, '%Y-%m') = :month
+                            GROUP BY DATE_FORMAT(filed_date, '%Y-%m'), claim_type
+                            ORDER BY count DESC</db:sql>
+                    <db:input-parameters><![CDATA[#[{ month: vars.month }]]]></db:input-parameters>
+                </db:select>
+            </route>
+            <route>
+                <db:select doc:name="Monthly new policies" config-ref="claims-db-config">
+                    <db:sql>SELECT policy_type, COUNT(*) as count,
+                                   SUM(coverage_amount) as total_coverage,
+                                   SUM(premium) as total_premium
+                            FROM policies
+                            WHERE DATE_FORMAT(created_at, '%Y-%m') = :month
+                            GROUP BY policy_type</db:sql>
+                    <db:input-parameters><![CDATA[#[{ month: vars.month }]]]></db:input-parameters>
+                </db:select>
+            </route>
+            <route>
+                <db:select doc:name="Top claimants" config-ref="claims-db-config">
+                    <db:sql>SELECT claimant_name, COUNT(*) as claims_count,
+                                   SUM(claim_amount) as total_claimed
+                            FROM claims
+                            WHERE DATE_FORMAT(filed_date, '%Y-%m') = :month
+                            GROUP BY claimant_name
+                            ORDER BY total_claimed DESC LIMIT 10</db:sql>
+                    <db:input-parameters><![CDATA[#[{ month: vars.month }]]]></db:input-parameters>
+                </db:select>
+            </route>
+        </scatter-gather>
+        <ee:transform doc:name="Transform report">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  success: true,
+  report: {
+    month: vars.month,
+    generatedAt: now() as String {format: "yyyy-MM-dd'T'HH:mm:ss'Z'"},
+    claimsSummary: payload."0".payload map {
+      claimType: $.claim_type,
+      count: $.count,
+      totalAmount: $.total_amount,
+      totalApproved: $.total_approved
+    },
+    newPolicies: payload."1".payload map {
+      policyType: $.policy_type,
+      count: $.count,
+      totalCoverage: $.total_coverage,
+      totalPremium: $.total_premium
+    },
+    topClaimants: payload."2".payload map {
+      name: $.claimant_name,
+      claimsCount: $.claims_count,
+      totalClaimed: $.total_claimed
+    }
+  }
+}]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+    </flow>
+
+    <!-- Audit Trail Endpoint -->
+    <flow name="get:\audit:insurance-api-router">
+        <logger level="INFO" doc:name="Log" message="Fetching audit trail"/>
+        <set-variable variableName="entityType" value="#[attributes.queryParams.entityType default 'ALL']" doc:name="Set entity type filter"/>
+        <set-variable variableName="days" value="#[attributes.queryParams.days default '30']" doc:name="Set days filter"/>
+        <db:select doc:name="Select audit log from Audit DB" config-ref="audit-db-config">
+            <db:sql>SELECT id, entity_type, entity_id, action, actor, details, created_at
+                    FROM audit_log
+                    WHERE created_at >= NOW() - CAST(:days || ' days' AS INTERVAL)
+                    AND (entity_type = :entityType OR :entityType = 'ALL')
+                    ORDER BY created_at DESC
+                    LIMIT 100</db:sql>
+            <db:input-parameters><![CDATA[#[{
+                entityType: vars.entityType,
+                days: vars.days
+            }]]]></db:input-parameters>
+        </db:select>
+        <ee:transform doc:name="Transform audit log">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  success: true,
+  count: sizeOf(payload),
+  filter: {
+    entityType: vars.entityType,
+    days: vars.days as Number
+  },
+  auditLog: payload map {
+    id: $.id,
+    entityType: $.entity_type,
+    entityId: $.entity_id,
+    action: $.action,
+    actor: $.actor,
+    details: $.details,
+    timestamp: $.created_at
+  }
+}]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+    </flow>
+
+    <!-- ================================================================= -->
+    <!-- HEALTH & DIAGNOSTICS                                               -->
+    <!-- ================================================================= -->
+
+    <!-- Health Check (verifies all 3 databases + file share) -->
+    <flow name="get:\health:insurance-api-router">
+        <logger level="INFO" doc:name="Log" message="Health check requested"/>
+        <scatter-gather doc:name="Check all services">
+            <!-- Check Claims DB (MySQL) -->
+            <route>
+                <try doc:name="Try Claims DB">
+                    <db:select doc:name="Ping Claims DB" config-ref="claims-db-config">
+                        <db:sql>SELECT 1 as ping</db:sql>
+                    </db:select>
+                    <set-payload value="UP" doc:name="Claims DB UP"/>
+                    <error-handler>
+                        <on-error-continue doc:name="Claims DB Down">
+                            <set-payload value="DOWN" doc:name="Claims DB DOWN"/>
+                        </on-error-continue>
+                    </error-handler>
+                </try>
+            </route>
+            <!-- Check Audit DB (PostgreSQL) -->
+            <route>
+                <try doc:name="Try Audit DB">
+                    <db:select doc:name="Ping Audit DB" config-ref="audit-db-config">
+                        <db:sql>SELECT 1 as ping</db:sql>
+                    </db:select>
+                    <set-payload value="UP" doc:name="Audit DB UP"/>
+                    <error-handler>
+                        <on-error-continue doc:name="Audit DB Down">
+                            <set-payload value="DOWN" doc:name="Audit DB DOWN"/>
+                        </on-error-continue>
+                    </error-handler>
+                </try>
+            </route>
+            <!-- Check Documents DB (SQL Server) -->
+            <route>
+                <try doc:name="Try Documents DB">
+                    <db:select doc:name="Ping Documents DB" config-ref="documents-db-config">
+                        <db:sql>SELECT 1 as ping</db:sql>
+                    </db:select>
+                    <set-payload value="UP" doc:name="Documents DB UP"/>
+                    <error-handler>
+                        <on-error-continue doc:name="Documents DB Down">
+                            <set-payload value="DOWN" doc:name="Documents DB DOWN"/>
+                        </on-error-continue>
+                    </error-handler>
+                </try>
+            </route>
+            <!-- Check Azure File Share -->
+            <route>
+                <try doc:name="Try File Share">
+                    <file:list doc:name="List File Share root" config-ref="azure-fileshare-config" directoryPath="/"/>
+                    <set-payload value="UP" doc:name="File Share UP"/>
+                    <error-handler>
+                        <on-error-continue doc:name="File Share Down">
+                            <set-payload value="DOWN" doc:name="File Share DOWN"/>
+                        </on-error-continue>
+                    </error-handler>
+                </try>
+            </route>
+        </scatter-gather>
+        <ee:transform doc:name="Health response">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+var allUp = (payload."0".payload == "UP") and (payload."1".payload == "UP")
+            and (payload."2".payload == "UP") and (payload."3".payload == "UP")
+---
+{
+  status: if (allUp) "UP" else "DEGRADED",
+  service: "Insurance Claims API",
+  version: "2.0.0",
+  environment: p('mule.env'),
+  timestamp: now() as String {format: "yyyy-MM-dd'T'HH:mm:ss'Z'"},
+  dependencies: {
+    claimsDatabase: { status: payload."0".payload, type: "MySQL" },
+    auditDatabase: { status: payload."1".payload, type: "PostgreSQL" },
+    documentsDatabase: { status: payload."2".payload, type: "SQL Server" },
+    fileShare: { status: payload."3".payload, type: "Azure File Share" }
+  }
+}]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+    </flow>
+
+    <!-- ================================================================= -->
+    <!-- SUB-FLOWS (Reusable Components)                                    -->
+    <!-- ================================================================= -->
+
+    <!-- Audit Access Sub-Flow (logs API access to Audit DB) -->
+    <sub-flow name="audit-access-sub-flow">
+        <try doc:name="Try audit logging">
+            <db:insert doc:name="Log API access" config-ref="audit-db-config">
+                <db:sql>INSERT INTO api_access_log (method, path, remote_addr, user_agent, created_at)
+                        VALUES (:method, :path, :remoteAddr, :userAgent, NOW())</db:sql>
+                <db:input-parameters><![CDATA[#[{
+                    method: attributes.method default "GET",
+                    path: attributes.requestPath default "/unknown",
+                    remoteAddr: attributes.remoteAddress default "0.0.0.0",
+                    userAgent: attributes.headers.'user-agent' default "unknown"
+                }]]]></db:input-parameters>
+            </db:insert>
+            <error-handler>
+                <on-error-continue doc:name="Ignore audit errors">
+                    <logger level="WARN" doc:name="Log audit failure" message="Failed to log API access"/>
+                </on-error-continue>
+            </error-handler>
+        </try>
+    </sub-flow>
+
+    <!-- Audit Error Sub-Flow -->
+    <sub-flow name="audit-error-sub-flow">
+        <try doc:name="Try error audit">
+            <db:insert doc:name="Log error to Audit DB" config-ref="audit-db-config">
+                <db:sql>INSERT INTO error_log (error_type, error_message, path, created_at)
+                        VALUES (:errorType, :errorMessage, :path, NOW())</db:sql>
+                <db:input-parameters><![CDATA[#[{
+                    errorType: error.errorType.identifier default "UNKNOWN",
+                    errorMessage: error.description default "No description",
+                    path: attributes.requestPath default "/unknown"
+                }]]]></db:input-parameters>
+            </db:insert>
+            <error-handler>
+                <on-error-continue doc:name="Ignore">
+                    <logger level="WARN" doc:name="Log" message="Failed to audit error"/>
+                </on-error-continue>
+            </error-handler>
+        </try>
+    </sub-flow>
+
+    <!-- Send Notification Sub-Flow (Email + HTTP webhook) -->
+    <sub-flow name="send-notification-sub-flow">
+        <try doc:name="Try sending notification">
+            <choice doc:name="Notification type">
+                <when expression="#[vars.notificationType == 'CLAIM_FILED']">
+                    <email:send doc:name="Send claim filed email" config-ref="email-smtp-config">
+                        <email:to-addresses>
+                            <email:to-address value="${notification.adminEmail}"/>
+                        </email:to-addresses>
+                        <email:body contentType="text/html">
+                            <email:content><![CDATA[#["<h2>New Claim Filed</h2><p>Claim Number: " ++ (vars.claimNumber default "N/A") ++ "</p><p>Amount: $" ++ (vars.claimData.claimAmount as String default "0") ++ "</p>"]]]></email:content>
+                        </email:body>
+                    </email:send>
+                </when>
+                <when expression="#[vars.notificationType == 'CLAIM_APPROVED' or vars.notificationType == 'CLAIM_REJECTED']">
+                    <email:send doc:name="Send status update email" config-ref="email-smtp-config">
+                        <email:to-addresses>
+                            <email:to-address value="${notification.adminEmail}"/>
+                        </email:to-addresses>
+                        <email:body contentType="text/html">
+                            <email:content><![CDATA[#["<h2>Claim " ++ vars.notificationType ++ "</h2><p>Claim ID: " ++ (vars.claimId as String default "N/A") ++ "</p>"]]]></email:content>
+                        </email:body>
+                    </email:send>
+                </when>
+                <otherwise>
+                    <logger level="DEBUG" doc:name="Log" message="No notification configured for this type"/>
+                </otherwise>
+            </choice>
+            <!-- Also send HTTP webhook -->
+            <http:request doc:name="Send webhook notification"
+                          config-ref="notification-service-config"
+                          method="POST"
+                          path="/api/webhooks/insurance">
+                <http:body><![CDATA[#[output application/json --- {
+                    type: vars.notificationType default "UNKNOWN",
+                    timestamp: now() as String {format: "yyyy-MM-dd'T'HH:mm:ss'Z'"},
+                    data: {
+                        claimId: vars.newClaimId default vars.claimId,
+                        policyId: vars.claimData.policyId default null
+                    }
+                }]]]></http:body>
+            </http:request>
+            <error-handler>
+                <on-error-continue doc:name="Ignore notification errors">
+                    <logger level="WARN" doc:name="Log" message="Notification failed (non-critical)"/>
+                </on-error-continue>
+            </error-handler>
+        </try>
+    </sub-flow>
+
+    <!-- Generate Approval PDF Sub-Flow -->
+    <sub-flow name="generate-approval-pdf-sub-flow">
+        <try doc:name="Try PDF generation">
+            <!-- Get claim details for PDF -->
+            <db:select doc:name="Get claim for PDF" config-ref="claims-db-config">
+                <db:sql>SELECT c.*, p.policy_number, p.holder_name
+                        FROM claims c JOIN policies p ON c.policy_id = p.policy_id
+                        WHERE c.claim_id = :claimId</db:sql>
+                <db:input-parameters><![CDATA[#[{ claimId: vars.claimId }]]]></db:input-parameters>
+            </db:select>
+            <set-variable variableName="claimForPdf" value="#[payload[0]]" doc:name="Save claim data"/>
+            <!-- Generate simple text-based approval document -->
+            <ee:transform doc:name="Create approval document content">
+                <ee:message>
+                    <ee:set-payload><![CDATA[%dw 2.0
+output text/plain
+---
+"INSURANCE CLAIM APPROVAL DOCUMENT\n" ++
+"==================================\n\n" ++
+"Date: " ++ (now() as String {format: "yyyy-MM-dd"}) ++ "\n" ++
+"Claim Number: " ++ (vars.claimForPdf.claim_number default "N/A") ++ "\n" ++
+"Policy Number: " ++ (vars.claimForPdf.policy_number default "N/A") ++ "\n" ++
+"Policyholder: " ++ (vars.claimForPdf.holder_name default "N/A") ++ "\n" ++
+"Claimant: " ++ (vars.claimForPdf.claimant_name default "N/A") ++ "\n\n" ++
+"Claim Amount: $" ++ (vars.claimForPdf.claim_amount as String default "0") ++ "\n" ++
+"Approved Amount: $" ++ (vars.statusData.approvedAmount as String default "0") ++ "\n\n" ++
+"Status: APPROVED\n\n" ++
+"This document confirms the approval of the above insurance claim."]]></ee:set-payload>
+                </ee:message>
+            </ee:transform>
+            <set-variable variableName="approvalFilePath" value="#['/claims/' ++ (vars.claimId as String) ++ '/approval_' ++ (vars.claimForPdf.claim_number default 'unknown') ++ '.txt']" doc:name="Set approval file path"/>
+            <!-- Write approval document to Azure File Share -->
+            <file:write doc:name="Write approval to File Share"
+                        config-ref="azure-fileshare-config"
+                        path="#[vars.approvalFilePath]"
+                        mode="OVERWRITE">
+                <file:content>#[payload]</file:content>
+            </file:write>
+            <!-- Record in Documents DB -->
+            <db:insert doc:name="Record approval document" config-ref="documents-db-config">
+                <db:sql>INSERT INTO claim_documents (policy_id, claim_id, document_name, document_type,
+                                                      file_path, uploaded_by, uploaded_at)
+                        VALUES (:policyId, :claimId, :docName, 'APPROVAL_LETTER',
+                                :filePath, 'system', GETDATE())</db:sql>
+                <db:input-parameters><![CDATA[#[{
+                    policyId: vars.claimForPdf.policy_id,
+                    claimId: vars.claimId,
+                    docName: "approval_" ++ (vars.claimForPdf.claim_number default "unknown") ++ ".txt",
+                    filePath: vars.approvalFilePath
+                }]]]></db:input-parameters>
+            </db:insert>
+            <error-handler>
+                <on-error-continue doc:name="Ignore PDF generation errors">
+                    <logger level="WARN" doc:name="Log" message="Approval document generation failed (non-critical)"/>
+                </on-error-continue>
+            </error-handler>
+        </try>
+    </sub-flow>
+
+</mule>

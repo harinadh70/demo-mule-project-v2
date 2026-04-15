@@ -1,0 +1,428 @@
+#%RAML 1.0
+title: Insurance Claims API
+version: v1
+baseUri: http://{environment}.example.com/api/{version}
+baseUriParameters:
+  environment:
+    type: string
+    enum: [dev, sit, uat, preprod, prod]
+mediaType: application/json
+
+types:
+  Policy:
+    type: object
+    properties:
+      policyId?: integer
+      policyNumber: string
+      holderName: string
+      holderEmail: string
+      policyType:
+        type: string
+        enum: [AUTO, HOME, HEALTH, LIFE, TRAVEL, COMMERCIAL]
+      coverageAmount: number
+      premium: number
+      status?:
+        type: string
+        enum: [ACTIVE, EXPIRED, CANCELLED, SUSPENDED, DELETED]
+      effectiveDate: date-only
+      expirationDate: date-only
+    example:
+      policyNumber: "POL-2024-001"
+      holderName: "John Smith"
+      holderEmail: "john.smith@email.com"
+      policyType: "AUTO"
+      coverageAmount: 50000.00
+      premium: 1200.00
+      effectiveDate: "2024-01-01"
+      expirationDate: "2025-01-01"
+
+  PolicyDetailResponse:
+    type: object
+    properties:
+      success: boolean
+      policy: Policy
+      claimsHistory: Claim[]
+      auditTrail: AuditEntry[]
+      documents: Document[]
+
+  PoliciesResponse:
+    type: object
+    properties:
+      success: boolean
+      count: integer
+      totalCount: integer
+      page: integer
+      pageSize: integer
+      totalPages: integer
+      policies: Policy[]
+
+  Claim:
+    type: object
+    properties:
+      claimId?: integer
+      claimNumber?: string
+      policyId: integer
+      policyNumber?: string
+      claimantName: string
+      claimType:
+        type: string
+        enum: [ACCIDENT, THEFT, NATURAL_DISASTER, MEDICAL, LIABILITY, PROPERTY_DAMAGE]
+      description: string
+      claimAmount: number
+      approvedAmount?: number
+      status?:
+        type: string
+        enum: [SUBMITTED, UNDER_REVIEW, APPROVED, REJECTED, CLOSED]
+      filedDate?: date-only
+      resolvedDate?: date-only
+    example:
+      policyId: 1
+      claimantName: "John Smith"
+      claimType: "ACCIDENT"
+      description: "Vehicle rear-ended at intersection"
+      claimAmount: 15000.00
+
+  ClaimDetailResponse:
+    type: object
+    properties:
+      success: boolean
+      claim: Claim
+      documents: Document[]
+      auditTrail: AuditEntry[]
+
+  ClaimsResponse:
+    type: object
+    properties:
+      success: boolean
+      count: integer
+      filter: string
+      claims: Claim[]
+
+  ClaimStatusUpdate:
+    type: object
+    properties:
+      status:
+        type: string
+        enum: [APPROVED, REJECTED, UNDER_REVIEW]
+      approvedAmount?: number
+      reason?: string
+    example:
+      status: "APPROVED"
+      approvedAmount: 12000.00
+
+  Document:
+    type: object
+    properties:
+      documentId?: integer
+      documentName: string
+      documentType:
+        type: string
+        enum: [PDF, IMAGE, CLAIM_FORM, APPROVAL_LETTER, EVIDENCE, OTHER]
+      filePath?: string
+      fileSizeBytes?: integer
+      uploadedBy?: string
+      uploadedAt?: datetime
+      downloadUrl?: string
+
+  DocumentsResponse:
+    type: object
+    properties:
+      success: boolean
+      count: integer
+      claimId: string
+      documents: Document[]
+
+  AuditEntry:
+    type: object
+    properties:
+      id?: integer
+      entityType?: string
+      entityId?: string
+      action: string
+      actor: string
+      details: string
+      timestamp: datetime
+
+  AuditLogResponse:
+    type: object
+    properties:
+      success: boolean
+      count: integer
+      filter: object
+      auditLog: AuditEntry[]
+
+  DashboardStats:
+    type: object
+    properties:
+      success: boolean
+      dashboard:
+        type: object
+        properties:
+          totalClaims: integer
+          claimsByStatus: object
+          financials: object
+          policies: object
+          recentActivity: object[]
+          documents: object
+
+  MonthlyReport:
+    type: object
+    properties:
+      success: boolean
+      report:
+        type: object
+        properties:
+          month: string
+          generatedAt: string
+          claimsSummary: object[]
+          newPolicies: object[]
+          topClaimants: object[]
+
+  HealthResponse:
+    type: object
+    properties:
+      status: string
+      service: string
+      version: string
+      environment: string
+      timestamp: string
+      dependencies: object
+
+  SuccessResponse:
+    type: object
+    properties:
+      success: boolean
+      message: string
+
+  ErrorResponse:
+    type: object
+    properties:
+      success: boolean
+      error: string
+      correlationId?: string
+
+/policies:
+  description: Insurance Policy Management
+  get:
+    displayName: Get All Policies
+    description: Retrieve all active insurance policies with pagination
+    queryParameters:
+      page:
+        type: integer
+        default: 1
+        required: false
+      pageSize:
+        type: integer
+        default: 20
+        required: false
+    responses:
+      200:
+        body:
+          type: PoliciesResponse
+  post:
+    displayName: Create Policy
+    description: Create a new insurance policy (writes to Claims DB + Audit DB)
+    body:
+      type: Policy
+    responses:
+      201:
+        body:
+          type: SuccessResponse
+      400:
+        body:
+          type: ErrorResponse
+
+  /{policyId}:
+    uriParameters:
+      policyId:
+        type: integer
+        description: Unique policy identifier
+    get:
+      displayName: Get Policy by ID
+      description: Retrieve policy with claims history, audit trail, and documents (queries 3 databases)
+      responses:
+        200:
+          body:
+            type: PolicyDetailResponse
+        404:
+          body:
+            type: ErrorResponse
+    put:
+      displayName: Update Policy
+      description: Update policy details (writes to Claims DB + Audit DB)
+      body:
+        type: Policy
+      responses:
+        200:
+          body:
+            type: SuccessResponse
+        404:
+          body:
+            type: ErrorResponse
+    delete:
+      displayName: Delete Policy
+      description: Soft-delete a policy (checks for open claims first)
+      responses:
+        200:
+          body:
+            type: SuccessResponse
+        404:
+          body:
+            type: ErrorResponse
+        409:
+          body:
+            type: ErrorResponse
+
+/claims:
+  description: Insurance Claims Management
+  get:
+    displayName: Get All Claims
+    description: Retrieve all insurance claims with optional status filter
+    queryParameters:
+      status:
+        type: string
+        enum: [ALL, SUBMITTED, UNDER_REVIEW, APPROVED, REJECTED, CLOSED]
+        default: ALL
+        required: false
+    responses:
+      200:
+        body:
+          type: ClaimsResponse
+  post:
+    displayName: File a Claim
+    description: File a new claim (validates policy, checks coverage, writes to 3 databases + file share)
+    body:
+      type: Claim
+    responses:
+      201:
+        body:
+          type: SuccessResponse
+      400:
+        body:
+          type: ErrorResponse
+
+  /{claimId}:
+    uriParameters:
+      claimId:
+        type: integer
+        description: Unique claim identifier
+    get:
+      displayName: Get Claim by ID
+      description: Retrieve claim with documents and audit trail (queries 3 databases)
+      responses:
+        200:
+          body:
+            type: ClaimDetailResponse
+        404:
+          body:
+            type: ErrorResponse
+
+    /status:
+      put:
+        displayName: Update Claim Status
+        description: Approve, reject, or move claim to review (writes to Claims DB + Audit DB + generates PDF to file share)
+        body:
+          type: ClaimStatusUpdate
+        responses:
+          200:
+            body:
+              type: SuccessResponse
+          400:
+            body:
+              type: ErrorResponse
+
+    /documents:
+      get:
+        displayName: List Claim Documents
+        description: List all documents for a claim (queries Documents DB / SQL Server)
+        responses:
+          200:
+            body:
+              type: DocumentsResponse
+      post:
+        displayName: Upload Document
+        description: Upload a PDF/document to Azure File Share and record metadata in SQL Server
+        headers:
+          x-file-name:
+            type: string
+            required: true
+          x-uploaded-by:
+            type: string
+            required: false
+        body:
+          type: file
+        responses:
+          201:
+            body:
+              type: SuccessResponse
+          404:
+            body:
+              type: ErrorResponse
+
+      /{documentId}:
+        uriParameters:
+          documentId:
+            type: integer
+        get:
+          displayName: Download Document
+          description: Download a document (PDF) from Azure File Share
+          responses:
+            200:
+              body:
+                type: file
+            404:
+              body:
+                type: ErrorResponse
+
+/dashboard:
+  /stats:
+    get:
+      displayName: Dashboard Statistics
+      description: Aggregated stats from all 3 databases (Claims DB + Audit DB + Documents DB)
+      responses:
+        200:
+          body:
+            type: DashboardStats
+
+/reports:
+  /monthly:
+    get:
+      displayName: Monthly Report
+      description: Monthly claims and policy report with top claimants
+      queryParameters:
+        month:
+          type: string
+          description: "Format: YYYY-MM"
+          required: false
+      responses:
+        200:
+          body:
+            type: MonthlyReport
+
+/audit:
+  get:
+    displayName: Audit Trail
+    description: Query audit log from PostgreSQL database
+    queryParameters:
+      entityType:
+        type: string
+        enum: [ALL, POLICY, CLAIM, DOCUMENT]
+        default: ALL
+        required: false
+      days:
+        type: integer
+        default: 30
+        required: false
+    responses:
+      200:
+        body:
+          type: AuditLogResponse
+
+/health:
+  get:
+    displayName: Health Check
+    description: Checks connectivity to all 3 databases + Azure File Share
+    responses:
+      200:
+        body:
+          type: HealthResponse

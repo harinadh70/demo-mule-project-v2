@@ -1,0 +1,63 @@
+# ========================================
+# DEV Environment - Insurance Claims API v2
+# Multi-Database + Azure File Share
+# ========================================
+
+http:
+  host: "0.0.0.0"
+  port: "8081"
+
+# PRIMARY DATABASE: Claims (MySQL on Azure)
+db:
+  claims:
+    host: "insurance-claims-mysql-dev.mysql.database.azure.com"
+    port: "3306"
+    name: "insurance_claims"
+    user: "claimsadmin"
+    password: "ClaimsDev2026!"
+
+  # SECONDARY DATABASE: Audit & Reporting (PostgreSQL on Azure)
+  audit:
+    url: "jdbc:postgresql://insurance-audit-pg-dev.postgres.database.azure.com:5432/audit_db?sslmode=require"
+    user: "auditadmin"
+    password: "AuditDev2026!"
+
+  # TERTIARY DATABASE: Document Metadata (SQL Server on Azure)
+  documents:
+    host: "insurance-docs-sql-dev.database.windows.net"
+    port: "1433"
+    name: "documents_db"
+    user: "docsadmin"
+    password: "DocsDev2026!"
+
+# Azure File Share (Storage Account)
+azure:
+  fileshare:
+    basePath: "/mnt/azure-fileshare/insurance-docs-dev"
+    storageAccount: "insurancedocsdev"
+    shareName: "claim-documents"
+    connectionString: "DefaultEndpointsProtocol=https;AccountName=insurancedocsdev;AccountKey=DEV_KEY_HERE;EndpointSuffix=core.windows.net"
+
+# Email SMTP (Azure Communication Services)
+email:
+  smtp:
+    host: "smtp.azurecomm.net"
+    port: "587"
+    user: "insurance-api-dev@acme-insurance.com"
+    password: "EmailDev2026!"
+
+# External Notification Service
+notification:
+  host: "notification-service-dev.azurewebsites.net"
+  port: "443"
+  apiKey: "dev-notification-api-key-12345"
+  adminEmail: "claims-admin-dev@acme-insurance.com"
+
+# API Discovery
+api:
+  autodiscovery:
+    id: "insurance-claims-api-v2-dev"
+
+# Logging
+logging:
+  level: "DEBUG"
